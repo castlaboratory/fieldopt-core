@@ -133,6 +133,7 @@ pub fn allocate_for_budget(strata: &[Stratum], budget: f64) -> Result<Allocation
 }
 
 /// Rounding can push the cost above the budget; drop units, one at a time,
+/// (this is a rounding repair, not a bound: `bounded` is left as it is),
 /// from the stratum whose unit removal raises the variance least per unit of
 /// cost saved, keeping `n_h >= 2`, until the cost fits. Then add units back
 /// greedily while they still fit.
@@ -157,7 +158,6 @@ fn repair_budget(strata: &[Stratum], budget: f64, a: &mut Allocation) {
                 a.n[h] -= 1;
                 a.cost -= strata[h].cost;
                 a.variance = variance_of(strata, &a.n);
-                a.bounded = true;
             }
             None => break,
         }
