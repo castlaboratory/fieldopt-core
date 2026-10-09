@@ -101,8 +101,9 @@ pub fn two_stage_for_variance(
     let b = t.s2_between / t.n_primary as f64;
     let denom = target_variance_mean + b;
     let n_raw = a / denom;
-    let n = (n_raw.ceil().max(2.0) as usize).min(t.n_primary);
-    if (n as f64 - n_raw.ceil()).abs() > 1e-9 {
+    let up = (n_raw - 1e-9).ceil();
+    let n = (up.max(2.0) as usize).min(t.n_primary);
+    if (n as f64 - up).abs() > 1e-9 {
         bounded = true;
     }
     Ok(finish(t, n, m, m_opt, bounded))

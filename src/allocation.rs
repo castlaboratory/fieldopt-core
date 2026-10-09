@@ -68,8 +68,9 @@ fn finish(strata: &[Stratum], raw: &[f64]) -> Allocation {
         .iter()
         .zip(raw)
         .map(|(s, &r)| {
-            let v = r.ceil().max(2.0).min(s.size as f64);
-            if (v - r.ceil()).abs() > 1e-9 {
+            let up = (r - 1e-9).ceil();
+            let v = up.max(2.0).min(s.size as f64);
+            if (v - up).abs() > 1e-9 {
                 bounded = true;
             }
             v as usize
