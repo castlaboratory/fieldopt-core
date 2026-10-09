@@ -32,13 +32,19 @@
 
 pub mod allocation;
 pub mod distance;
+pub mod dualframe;
 pub mod estimation;
 pub mod rng;
 pub mod routing;
 pub mod sampling;
+pub mod spatial;
+pub mod twostage;
 
 pub use allocation::{allocate_for_budget, allocate_for_variance, Allocation, Stratum};
 pub use distance::{euclidean_matrix, haversine_matrix, Matrix};
+pub use dualframe::{dual_frame_allocation, Domain, DualFrame, DualFrameAllocation, Target};
 pub use estimation::{ht_total, local_mean_variance, srs_variance};
 pub use routing::{grasp_routes, route_length, GraspOptions, RouteLimits, Solution};
 pub use sampling::{inclusion_probabilities, local_pivotal};
+pub use spatial::{hilbert_order, systematic_replicates};
+pub use twostage::{two_stage_for_budget, two_stage_for_variance, TwoStage, TwoStageAllocation};

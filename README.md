@@ -28,6 +28,20 @@ fieldopt-core = "0.1"
 See the crate documentation for an end-to-end example (select segments, route
 the field work, estimate).
 
+
+Version 0.2 adds the pieces an area-frame or dual-frame survey needs:
+
+- `spatial`: order of units along a Hilbert curve and systematic PPS
+  sampling along it, as independent interpenetrating replicates for
+  design-based variance estimation.
+- `dualframe`: Hartley's dual-frame allocation (area + list with overlap):
+  cost-optimal sample sizes in each frame and the optimal mixing weight
+  `theta`, or the screening design (`theta = 0`), for a target variance or
+  a budget, with design effects.
+- `twostage`: Cochran's two-stage allocation with the cost function
+  `c1 n + c2 n m`: optimal secondary units per primary unit and the number
+  of primary units for a target variance or a budget.
+
 ## License
 
 GPL-3.0-or-later. © CAST Lab, Universidade Federal de Pernambuco.
