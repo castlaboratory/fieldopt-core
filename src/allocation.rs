@@ -98,37 +98,97 @@ pub fn allocate_for_variance(
     if !target_variance.is_finite() || target_variance <= 0.0 {
         return Err("the target variance must be positive".into());
     }
-    let a: f64 = strata
-        .iter()
-        .map(|s| s.size as f64 * s.sd * s.cost.sqrt())
-        .sum();
-    let b: f64 = strata.iter().map(|s| s.size as f64 * s.sd * s.sd).sum();
-    let denom = target_variance + b;
-    let raw: Vec<f64> = strata
-        .iter()
-        .map(|s| s.size as f64 * s.sd / s.cost.sqrt() * a / denom)
-        .collect();
-    Ok(finish(strata, &raw))
+    // Strata whose unrounded optimum exceeds their size are taken completely
+    // (they then contribute no variance) and the rest is re-solved for the
+    // same target, until no new stratum hits its size.
+    let h = strata.len();
+    let mut full = vec![false; h];
+    let mut raw = vec![0.0; h];
+    loop {
+        let a: f64 = (0..h)
+            .filter(|&i| !full[i])
+            .map(|i| strata[i].size as f64 * strata[i].sd * strata[i].cost.sqrt())
+            .sum();
+        let b: f64 = (0..h)
+            .filter(|&i| !full[i])
+            .map(|i| strata[i].size as f64 * strata[i].sd * strata[i].sd)
+            .sum();
+        let denom = target_variance + b;
+        let mut new_full = false;
+        for i in 0..h {
+            if full[i] {
+                raw[i] = strata[i].size as f64;
+                continue;
+            }
+            raw[i] = strata[i].size as f64 * strata[i].sd / strata[i].cost.sqrt() * a / denom;
+            if raw[i] >= strata[i].size as f64 {
+                full[i] = true;
+                new_full = true;
+            }
+        }
+        if !new_full {
+            break;
+        }
+    }
+    let mut out = finish(strata, &raw);
+    out.bounded = out.bounded || full.iter().any(|&f| f);
+    Ok(out)
 }
 
-/// Allocation that minimises variance subject to cost at most `budget`.
 pub fn allocate_for_budget(strata: &[Stratum], budget: f64) -> Result<Allocation, String> {
     validate(strata)?;
     if !budget.is_finite() || budget <= 0.0 {
         return Err("the budget must be positive".into());
     }
-    let a: f64 = strata
+    let h = strata.len();
+    let a_all: f64 = strata
         .iter()
         .map(|s| s.size as f64 * s.sd * s.cost.sqrt())
         .sum();
-    if a <= 0.0 {
+    if a_all <= 0.0 {
         return Err("every stratum has zero standard deviation; nothing to allocate".into());
     }
-    let raw: Vec<f64> = strata
-        .iter()
-        .map(|s| budget * s.size as f64 * s.sd / s.cost.sqrt() / a)
-        .collect();
+    // Strata whose optimum exceeds their size are taken completely; their
+    // cost is removed from the budget and the rest is re-solved.
+    let mut full = vec![false; h];
+    let mut raw = vec![0.0; h];
+    loop {
+        let spent: f64 = (0..h)
+            .filter(|&i| full[i])
+            .map(|i| strata[i].cost * strata[i].size as f64)
+            .sum();
+        let left = budget - spent;
+        if left <= 0.0 {
+            return Err(
+                "the budget does not cover the strata that must be taken completely".into(),
+            );
+        }
+        let a: f64 = (0..h)
+            .filter(|&i| !full[i])
+            .map(|i| strata[i].size as f64 * strata[i].sd * strata[i].cost.sqrt())
+            .sum();
+        let mut new_full = false;
+        for i in 0..h {
+            if full[i] {
+                raw[i] = strata[i].size as f64;
+                continue;
+            }
+            raw[i] = if a > 0.0 {
+                left * strata[i].size as f64 * strata[i].sd / strata[i].cost.sqrt() / a
+            } else {
+                2.0
+            };
+            if raw[i] >= strata[i].size as f64 {
+                full[i] = true;
+                new_full = true;
+            }
+        }
+        if !new_full {
+            break;
+        }
+    }
     let mut a = finish(strata, &raw);
+    a.bounded = a.bounded || full.iter().any(|&f| f);
     repair_budget(strata, budget, &mut a);
     Ok(a)
 }
@@ -245,6 +305,34 @@ mod tests {
             1.0
         )
         .is_err());
+    }
+
+    #[test]
+    fn full_strata_keep_the_target() {
+        // frame B is tiny and cheap: taken completely; the target must still hold
+        let strata = vec![
+            Stratum {
+                size: 680,
+                sd: 24.0,
+                cost: 103.0,
+            },
+            Stratum {
+                size: 100,
+                sd: 32.0,
+                cost: 45.0,
+            },
+        ];
+        let a = allocate_for_variance(&strata, 119_025.0).unwrap();
+        assert_eq!(a.n[1], 100);
+        assert!(
+            a.variance <= 119_025.0 * (1.0 + 1e-9),
+            "variance {}",
+            a.variance
+        );
+        assert!(a.bounded);
+        let b = allocate_for_budget(&strata, 20_000.0).unwrap();
+        assert!(b.cost <= 20_000.0 + 1e-9);
+        assert!(b.n[1] <= 100);
     }
 
     #[test]
