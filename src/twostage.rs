@@ -41,7 +41,11 @@ pub struct TwoStageAllocation {
 }
 
 fn validate(t: &TwoStage) -> Result<(), String> {
-    if t.n_primary < 2 || t.m_secondary.is_nan() || t.m_secondary < 1.0 || !t.m_secondary.is_finite() {
+    if t.n_primary < 2
+        || t.m_secondary.is_nan()
+        || t.m_secondary < 1.0
+        || !t.m_secondary.is_finite()
+    {
         return Err(
             "the population needs at least two primary units and one secondary unit".into(),
         );

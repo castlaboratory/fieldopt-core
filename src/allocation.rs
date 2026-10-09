@@ -256,9 +256,234 @@ fn repair_budget(strata: &[Stratum], budget: f64, a: &mut Allocation) {
     }
 }
 
+/// Multivariate allocation: minimum cost `sum c_h n_h` such that the variance
+/// of the estimated total of every study variable `j` is at most its target,
+/// `sum_h N_h^2 S_hj^2 / n_h - sum_h N_h S_hj^2 <= V0_j` (Bethel 1989;
+/// Chromy 1987). `sd` is `H x J` row-major (one column per variable, in the
+/// same units as `targets`). The Lagrangian solution `n_h = sqrt(sum_j mu_j
+/// a_hj / c_h)` is found by multiplicative updates of the multipliers; strata
+/// whose solution exceeds their size are taken completely and the rest
+/// re-solved; every stratum keeps at least two units. Returns the allocation
+/// and, in `attained`, the variance of each variable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MultiAllocation {
+    pub n: Vec<usize>,
+    pub cost: f64,
+    /// Variance attained for each variable.
+    pub attained: Vec<f64>,
+    /// Whether a bound (`2 <= n_h <= N_h`) moved the solution.
+    pub bounded: bool,
+    /// Multipliers of the constraints: zero for a constraint that is slack.
+    pub multipliers: Vec<f64>,
+}
+
+pub fn allocate_multivariate(
+    sizes: &[usize],
+    costs: &[f64],
+    sd: &[f64],
+    targets: &[f64],
+) -> Result<MultiAllocation, String> {
+    let h = sizes.len();
+    let j = targets.len();
+    if h == 0 || j == 0 || costs.len() != h || sd.len() != h * j {
+        return Err("sizes and costs need one entry per stratum, sd one row per stratum and one column per target".into());
+    }
+    if sizes.iter().any(|&n| n < 2) {
+        return Err("every stratum needs at least two units".into());
+    }
+    if costs.iter().any(|c| !c.is_finite() || *c <= 0.0) {
+        return Err("costs must be positive".into());
+    }
+    if sd.iter().any(|s| !s.is_finite() || *s < 0.0) {
+        return Err("standard deviations must be finite and non-negative".into());
+    }
+    if targets.iter().any(|v| !v.is_finite() || *v <= 0.0) {
+        return Err("target variances must be positive".into());
+    }
+    let big_n: Vec<f64> = sizes.iter().map(|&n| n as f64).collect();
+    // constraint j: sum_h a_hj / n_h <= b_j
+    let a = |hh: usize, jj: usize| big_n[hh].powi(2) * sd[hh * j + jj].powi(2);
+    let b: Vec<f64> = (0..j)
+        .map(|jj| {
+            targets[jj]
+                + (0..h)
+                    .map(|hh| big_n[hh] * sd[hh * j + jj].powi(2))
+                    .sum::<f64>()
+        })
+        .collect();
+    let mut full = vec![false; h];
+    let mut raw = vec![0.0; h];
+    let mut mu = vec![1.0; j];
+    loop {
+        // budget left for each constraint after the full strata
+        let b_left: Vec<f64> = (0..j)
+            .map(|jj| {
+                b[jj]
+                    - (0..h)
+                        .filter(|&hh| full[hh])
+                        .map(|hh| a(hh, jj) / big_n[hh])
+                        .sum::<f64>()
+            })
+            .collect();
+        if b_left.iter().any(|v| *v <= 0.0) {
+            return Err("a target variance cannot be met even by observing every unit".into());
+        }
+        let free: Vec<usize> = (0..h).filter(|&hh| !full[hh]).collect();
+        if free.is_empty() {
+            break;
+        }
+        // binding set: constraints that cannot be satisfied are those with positive mu
+        for _ in 0..20_000 {
+            for &hh in &free {
+                let num: f64 = (0..j).map(|jj| mu[jj] * a(hh, jj)).sum();
+                raw[hh] = (num / costs[hh]).sqrt().max(1e-9);
+            }
+            let ratios: Vec<f64> = (0..j)
+                .map(|jj| free.iter().map(|&hh| a(hh, jj) / raw[hh]).sum::<f64>() / b_left[jj])
+                .collect();
+            let mut done = true;
+            for jj in 0..j {
+                let r = ratios[jj];
+                if r > 1.0 + 1e-9 || (mu[jj] > 1e-12 && r < 1.0 - 1e-9) {
+                    done = false;
+                }
+                mu[jj] *= r.powf(0.5);
+                if mu[jj] < 1e-14 {
+                    mu[jj] = 0.0;
+                }
+            }
+            if mu.iter().all(|v| *v == 0.0) {
+                mu = vec![1e-6; j];
+            }
+            if done {
+                break;
+            }
+        }
+        // scale up so that no constraint is violated after the solve
+        let worst = (0..j)
+            .map(|jj| free.iter().map(|&hh| a(hh, jj) / raw[hh]).sum::<f64>() / b_left[jj])
+            .fold(0.0, f64::max);
+        if worst > 1.0 {
+            for &hh in &free {
+                raw[hh] *= worst;
+            }
+        }
+        let mut new_full = false;
+        for &hh in &free {
+            if raw[hh] >= big_n[hh] - 1e-9 {
+                full[hh] = true;
+                raw[hh] = big_n[hh];
+                new_full = true;
+            }
+        }
+        if !new_full {
+            break;
+        }
+    }
+    let mut bounded = full.iter().any(|&f| f);
+    let n: Vec<usize> = (0..h)
+        .map(|hh| {
+            let up = (raw[hh] - 1e-9).ceil();
+            if up < 2.0 {
+                bounded = true;
+            }
+            (up.max(2.0).min(big_n[hh])) as usize
+        })
+        .collect();
+    let cost = (0..h).map(|hh| costs[hh] * n[hh] as f64).sum();
+    let attained: Vec<f64> = (0..j)
+        .map(|jj| {
+            (0..h)
+                .map(|hh| a(hh, jj) / n[hh] as f64 - big_n[hh] * sd[hh * j + jj].powi(2))
+                .sum()
+        })
+        .collect();
+    Ok(MultiAllocation {
+        n,
+        cost,
+        attained,
+        bounded,
+        multipliers: mu,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multivariate_allocation_meets_every_target_at_minimum_cost() {
+        // two strata, two variables; the second variable is the binding one in stratum 2
+        let sizes = [1000usize, 500];
+        let costs = [10.0, 30.0];
+        let sd = [5.0, 2.0, 3.0, 9.0]; // H x J
+                                       // targets from the univariate optimum of each variable at n = 120 total
+        let s1 = [
+            Stratum {
+                size: 1000,
+                sd: 5.0,
+                cost: 10.0,
+            },
+            Stratum {
+                size: 500,
+                sd: 3.0,
+                cost: 30.0,
+            },
+        ];
+        let s2 = [
+            Stratum {
+                size: 1000,
+                sd: 2.0,
+                cost: 10.0,
+            },
+            Stratum {
+                size: 500,
+                sd: 9.0,
+                cost: 30.0,
+            },
+        ];
+        let v1 = allocate_for_budget(&s1, 2000.0).unwrap().variance;
+        let v2 = allocate_for_budget(&s2, 2000.0).unwrap().variance;
+        let m = allocate_multivariate(&sizes, &costs, &sd, &[v1, v2]).unwrap();
+        assert!(
+            m.attained[0] <= v1 * (1.0 + 1e-6),
+            "{} vs {v1}",
+            m.attained[0]
+        );
+        assert!(
+            m.attained[1] <= v2 * (1.0 + 1e-6),
+            "{} vs {v2}",
+            m.attained[1]
+        );
+        // each univariate solution costs 2000; meeting both must cost at least that
+        assert!(m.cost >= 2000.0 - costs[1]);
+        // and no cheaper integer allocation meets both targets (grid search)
+        let var = |n1: usize, n2: usize, jj: usize| -> f64 {
+            let a = |hh: usize| (sizes[hh] as f64).powi(2) * sd[hh * 2 + jj].powi(2);
+            let c = |hh: usize| sizes[hh] as f64 * sd[hh * 2 + jj].powi(2);
+            a(0) / n1 as f64 + a(1) / n2 as f64 - c(0) - c(1)
+        };
+        for n1 in 2..400usize {
+            for n2 in 2..200usize {
+                let c = 10.0 * n1 as f64 + 30.0 * n2 as f64;
+                if c < m.cost - 1e-9 && var(n1, n2, 0) <= v1 && var(n1, n2, 1) <= v2 {
+                    panic!(
+                        "cheaper feasible allocation ({n1}, {n2}) at cost {c} < {}",
+                        m.cost
+                    );
+                }
+            }
+        }
+        // a single variable reproduces the univariate allocation
+        let uni = allocate_for_variance(&s1, v1).unwrap();
+        let one = allocate_multivariate(&sizes, &costs, &[5.0, 3.0], &[v1]).unwrap();
+        assert_eq!(one.n, uni.n);
+        // a tiny target takes every unit
+        let all = allocate_multivariate(&sizes, &costs, &sd, &[1e-9, v2]).unwrap();
+        assert_eq!(all.n, vec![1000, 500]);
+        assert!(all.bounded);
+        assert!(allocate_multivariate(&sizes, &costs, &sd, &[v1]).is_err());
+    }
 
     #[test]
     fn budget_below_the_floor_is_refused_and_small_optima_are_flagged() {

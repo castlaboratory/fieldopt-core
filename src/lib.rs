@@ -2,10 +2,13 @@
 //!
 //! Field-survey design under real field cost. The crate provides the
 //! computational pieces behind the R package `fieldopt`: travel matrices,
-//! GRASP routing of field work, spatially balanced sampling with the local
-//! pivotal method, Horvitz-Thompson estimation with the local-mean variance
-//! estimator, and cost-aware allocation across strata or frames. It has no
-//! dependencies and every randomised step is reproducible from a seed.
+//! GRASP routing of field work (with service times and route limits),
+//! spatially balanced sampling with the local pivotal method, balanced
+//! sampling with the cube method and the Voronoi measure of spatial balance,
+//! Horvitz-Thompson estimation with the local-mean variance estimator, and
+//! cost-aware allocation across strata or frames, for one or several study
+//! variables, in dual frames and in two stages. It has no dependencies and
+//! every randomised step is reproducible from a seed.
 //!
 //! ```
 //! use fieldopt_core::distance::euclidean_matrix;
@@ -34,6 +37,7 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod allocation;
+pub mod balance;
 pub mod distance;
 pub mod dualframe;
 pub mod estimation;
@@ -43,11 +47,18 @@ pub mod sampling;
 pub mod spatial;
 pub mod twostage;
 
-pub use allocation::{allocate_for_budget, allocate_for_variance, Allocation, Stratum};
+pub use allocation::{
+    allocate_for_budget, allocate_for_variance, allocate_multivariate, Allocation, MultiAllocation,
+    Stratum,
+};
+pub use balance::{cube, spatial_balance};
 pub use distance::{euclidean_matrix, haversine_matrix, Matrix};
 pub use dualframe::{dual_frame_allocation, Domain, DualFrame, DualFrameAllocation, Target};
 pub use estimation::{ht_total, local_mean_variance, srs_variance};
-pub use routing::{grasp_routes, route_length, GraspOptions, RouteLimits, Solution};
+pub use routing::{
+    grasp_routes, grasp_routes_with_service, route_duration, route_length, GraspOptions,
+    RouteLimits, Solution,
+};
 pub use sampling::{inclusion_probabilities, local_pivotal};
 pub use spatial::{hilbert_order, systematic_replicates};
 pub use twostage::{two_stage_for_budget, two_stage_for_variance, TwoStage, TwoStageAllocation};

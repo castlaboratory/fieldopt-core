@@ -70,6 +70,9 @@ pub struct Solution {
     pub routes: Vec<Vec<usize>>,
     /// Travel cost of each route, depot to depot.
     pub lengths: Vec<f64>,
+    /// Duration of each route: travel plus the service time of its units
+    /// (equal to `lengths` when no service time is given).
+    pub durations: Vec<f64>,
     /// Total travel cost.
     pub total: f64,
     /// A lower bound on the total cost of any solution visiting the same units
@@ -374,6 +377,7 @@ fn split(
     m: &Matrix,
     depot: usize,
     tour: &[usize],
+    service: &[f64],
     limits: &RouteLimits,
 ) -> Option<Vec<Vec<usize>>> {
     let n = tour.len();
@@ -385,6 +389,7 @@ fn split(
             continue;
         }
         let mut len = 0.0;
+        let mut served = 0.0;
         for j in i..n {
             if j - i + 1 > limits.max_stops {
                 break;
@@ -394,8 +399,9 @@ fn split(
             } else {
                 len += m.get(tour[j - 1], tour[j]);
             }
+            served += service[tour[j]];
             let route_cost = len + m.get(tour[j], depot);
-            if route_cost > limits.max_length {
+            if route_cost + served > limits.max_length {
                 break;
             }
             if cost[i] + route_cost < cost[j + 1] {
@@ -429,7 +435,43 @@ pub fn grasp_routes(
     limits: RouteLimits,
     options: GraspOptions,
 ) -> Result<Solution, String> {
+    grasp_routes_with_service(m, depot, units, &[], limits, options)
+}
+
+/// Duration of a route: its travel plus the service time of its units.
+pub fn route_duration(m: &Matrix, depot: usize, route: &[usize], service: &[f64]) -> f64 {
+    route_length(m, depot, route)
+        + route
+            .iter()
+            .map(|&u| service.get(u).copied().unwrap_or(0.0))
+            .sum::<f64>()
+}
+
+/// As [`grasp_routes`], with a service time per node of the matrix (time
+/// spent at each unit: interviews, measurements). `max_length` then limits
+/// the duration of a route, travel plus service, while the objective stays
+/// the total travel; `service` may be empty for none, and the depot's entry
+/// is ignored.
+pub fn grasp_routes_with_service(
+    m: &Matrix,
+    depot: usize,
+    units: &[usize],
+    service: &[f64],
+    limits: RouteLimits,
+    options: GraspOptions,
+) -> Result<Solution, String> {
     validate(m, depot, units)?;
+    if !service.is_empty() && service.len() != m.len() {
+        return Err("service must have one entry per node of the matrix".into());
+    }
+    if service.iter().any(|s| !s.is_finite() || *s < 0.0) {
+        return Err("service times must be finite and non-negative".into());
+    }
+    let service: Vec<f64> = if service.is_empty() {
+        vec![0.0; m.len()]
+    } else {
+        service.to_vec()
+    };
     if !(0.0..=1.0).contains(&options.alpha) {
         return Err("alpha must be in [0, 1]".into());
     }
@@ -446,7 +488,7 @@ pub fn grasp_routes(
     for it in 0..options.iterations {
         let mut tour = construct(m, depot, units, options.alpha, &mut rng);
         local_search(m, depot, &mut tour, symmetric);
-        let mut routes = match split(m, depot, &tour, &limits) {
+        let mut routes = match split(m, depot, &tour, &service, &limits) {
             Some(r) => r,
             None => return Err("some unit cannot be served within the route limits".into()),
         };
@@ -456,11 +498,16 @@ pub fn grasp_routes(
             }
         }
         let lengths: Vec<f64> = routes.iter().map(|r| route_length(m, depot, r)).collect();
+        let durations: Vec<f64> = routes
+            .iter()
+            .map(|r| route_duration(m, depot, r, &service))
+            .collect();
         let total: f64 = lengths.iter().sum();
         if best.as_ref().map_or(true, |b| total < b.total - 1e-12) {
             best = Some(Solution {
                 routes,
                 lengths,
+                durations,
                 total,
                 lower_bound,
                 best_iteration: it + 1,
@@ -645,6 +692,34 @@ mod tests {
         let s = grasp_routes(&m, 0, &[1, 2, 3], limits, GraspOptions::default()).unwrap();
         assert!(s.total.abs() < 1e-12);
         assert!(s.lower_bound <= s.total + 1e-12);
+    }
+
+    #[test]
+    fn service_time_counts_towards_the_route_limit() {
+        let m = square_points();
+        let units: Vec<usize> = (1..9).collect();
+        let service = vec![0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
+        let limits = RouteLimits {
+            max_length: 5.0,
+            max_stops: usize::MAX,
+        };
+        let o = GraspOptions {
+            iterations: 20,
+            alpha: 0.3,
+            seed: 1,
+        };
+        let no_service = grasp_routes(&m, 0, &units, limits, o).unwrap();
+        let with = grasp_routes_with_service(&m, 0, &units, &service, limits, o).unwrap();
+        assert!(with.routes.len() > no_service.routes.len());
+        assert!(with.durations.iter().all(|&d| d <= 5.0 + 1e-9));
+        for (k, r) in with.routes.iter().enumerate() {
+            assert!((with.durations[k] - with.lengths[k] - r.len() as f64).abs() < 1e-9);
+        }
+        // a unit whose service alone exceeds the limit cannot be served
+        let mut heavy = service.clone();
+        heavy[3] = 10.0;
+        assert!(grasp_routes_with_service(&m, 0, &units, &heavy, limits, o).is_err());
+        assert!(grasp_routes_with_service(&m, 0, &units, &[1.0], limits, o).is_err());
     }
 
     #[test]
