@@ -18,7 +18,11 @@ impl Matrix {
     /// Build from a row-major vector of length `n * n`.
     pub fn from_vec(n: usize, data: Vec<f64>) -> Result<Self, String> {
         if data.len() != n * n {
-            return Err(format!("expected {} values for an {n} x {n} matrix, got {}", n * n, data.len()));
+            return Err(format!(
+                "expected {} values for an {n} x {n} matrix, got {}",
+                n * n,
+                data.len()
+            ));
         }
         if data.iter().any(|v| !v.is_finite() || *v < 0.0) {
             return Err("travel costs must be finite and non-negative".into());
@@ -57,17 +61,23 @@ pub fn haversine_matrix(lat: &[f64], lon: &[f64]) -> Result<Matrix, String> {
     if lat.len() != lon.len() {
         return Err("latitude and longitude must have the same length".into());
     }
-    if lat.iter().any(|v| !(-90.0..=90.0).contains(v)) || lon.iter().any(|v| !(-180.0..=180.0).contains(v)) {
+    if lat.iter().any(|v| !(-90.0..=90.0).contains(v))
+        || lon.iter().any(|v| !(-180.0..=180.0).contains(v))
+    {
         return Err("latitude must be in [-90, 90] and longitude in [-180, 180] degrees".into());
     }
     let n = lat.len();
-    let (la, lo): (Vec<f64>, Vec<f64>) = (lat.iter().map(|v| v.to_radians()).collect(), lon.iter().map(|v| v.to_radians()).collect());
+    let (la, lo): (Vec<f64>, Vec<f64>) = (
+        lat.iter().map(|v| v.to_radians()).collect(),
+        lon.iter().map(|v| v.to_radians()).collect(),
+    );
     let mut data = vec![0.0; n * n];
     for i in 0..n {
         for j in (i + 1)..n {
             let dlat = la[j] - la[i];
             let dlon = lo[j] - lo[i];
-            let a = (dlat / 2.0).sin().powi(2) + la[i].cos() * la[j].cos() * (dlon / 2.0).sin().powi(2);
+            let a =
+                (dlat / 2.0).sin().powi(2) + la[i].cos() * la[j].cos() * (dlon / 2.0).sin().powi(2);
             let d = 2.0 * EARTH_RADIUS_KM * a.sqrt().asin();
             data[i * n + j] = d;
             data[j * n + i] = d;

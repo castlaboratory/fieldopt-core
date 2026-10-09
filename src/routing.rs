@@ -27,7 +27,10 @@ pub struct RouteLimits {
 
 impl Default for RouteLimits {
     fn default() -> Self {
-        RouteLimits { max_length: f64::INFINITY, max_stops: usize::MAX }
+        RouteLimits {
+            max_length: f64::INFINITY,
+            max_stops: usize::MAX,
+        }
     }
 }
 
@@ -45,7 +48,11 @@ pub struct GraspOptions {
 
 impl Default for GraspOptions {
     fn default() -> Self {
-        GraspOptions { iterations: 200, alpha: 0.3, seed: 1 }
+        GraspOptions {
+            iterations: 200,
+            alpha: 0.3,
+            seed: 1,
+        }
     }
 }
 
@@ -117,7 +124,11 @@ fn two_edge_bound(m: &Matrix, depot: usize, units: &[usize]) -> f64 {
     nodes.push(depot);
     nodes.extend_from_slice(units);
     if nodes.len() < 3 {
-        return if nodes.len() == 2 { 2.0 * m.get(nodes[0], nodes[1]) } else { 0.0 };
+        return if nodes.len() == 2 {
+            2.0 * m.get(nodes[0], nodes[1])
+        } else {
+            0.0
+        };
     }
     let mut sum = 0.0;
     for &i in &nodes {
@@ -152,7 +163,9 @@ fn construct(m: &Matrix, depot: usize, units: &[usize], alpha: f64, rng: &mut Rn
             hi = hi.max(c);
         }
         let threshold = lo + alpha * (hi - lo);
-        let candidates: Vec<usize> = (0..remaining.len()).filter(|&k| costs[k] <= threshold).collect();
+        let candidates: Vec<usize> = (0..remaining.len())
+            .filter(|&k| costs[k] <= threshold)
+            .collect();
         let pick = candidates[rng.below(candidates.len())];
         current = remaining.swap_remove(pick);
         tour.push(current);
@@ -166,7 +179,13 @@ fn two_opt(m: &Matrix, depot: usize, tour: &mut [usize]) -> bool {
     if n < 3 {
         return false;
     }
-    let node = |tour: &[usize], k: isize| -> usize { if k < 0 || k as usize >= tour.len() { depot } else { tour[k as usize] } };
+    let node = |tour: &[usize], k: isize| -> usize {
+        if k < 0 || k as usize >= tour.len() {
+            depot
+        } else {
+            tour[k as usize]
+        }
+    };
     let mut improved_any = false;
     let mut improved = true;
     while improved {
@@ -204,12 +223,21 @@ fn or_opt(m: &Matrix, depot: usize, tour: &mut Vec<usize>) -> bool {
                 let last = tour[i + seg - 1];
                 let removal_gain = m.get(prev, first) + m.get(last, next) - m.get(prev, next);
                 // candidate insertion positions in the tour without the segment
-                let rest: Vec<usize> = tour.iter().enumerate().filter(|(k, _)| *k < i || *k >= i + seg).map(|(_, &u)| u).collect();
+                let rest: Vec<usize> = tour
+                    .iter()
+                    .enumerate()
+                    .filter(|(k, _)| *k < i || *k >= i + seg)
+                    .map(|(_, &u)| u)
+                    .collect();
                 for p in 0..=rest.len() {
                     let a = if p == 0 { depot } else { rest[p - 1] };
                     let b = if p >= rest.len() { depot } else { rest[p] };
                     for &reversed in &[false, true] {
-                        let (f, l) = if reversed { (last, first) } else { (first, last) };
+                        let (f, l) = if reversed {
+                            (last, first)
+                        } else {
+                            (first, last)
+                        };
                         let insert_cost = m.get(a, f) + m.get(l, b) - m.get(a, b);
                         if insert_cost < removal_gain - 1e-12 {
                             let mut segment: Vec<usize> = tour[i..i + seg].to_vec();
@@ -245,7 +273,12 @@ fn local_search(m: &Matrix, depot: usize, tour: &mut Vec<usize>) {
 
 /// Optimal split of a giant tour into routes respecting the limits (Prins 2004).
 /// Returns `None` if some unit cannot be served within the limits alone.
-fn split(m: &Matrix, depot: usize, tour: &[usize], limits: &RouteLimits) -> Option<Vec<Vec<usize>>> {
+fn split(
+    m: &Matrix,
+    depot: usize,
+    tour: &[usize],
+    limits: &RouteLimits,
+) -> Option<Vec<Vec<usize>>> {
     let n = tour.len();
     let mut cost = vec![f64::INFINITY; n + 1];
     let mut pred = vec![usize::MAX; n + 1];
@@ -292,7 +325,13 @@ fn split(m: &Matrix, depot: usize, tour: &[usize], limits: &RouteLimits) -> Opti
 ///
 /// With default limits the result is a single tour (TSP). Returns an error
 /// for invalid indices or when a unit cannot be served within the limits.
-pub fn grasp_routes(m: &Matrix, depot: usize, units: &[usize], limits: RouteLimits, options: GraspOptions) -> Result<Solution, String> {
+pub fn grasp_routes(
+    m: &Matrix,
+    depot: usize,
+    units: &[usize],
+    limits: RouteLimits,
+    options: GraspOptions,
+) -> Result<Solution, String> {
     validate(m, depot, units)?;
     if !(0.0..=1.0).contains(&options.alpha) {
         return Err("alpha must be in [0, 1]".into());
@@ -300,7 +339,7 @@ pub fn grasp_routes(m: &Matrix, depot: usize, units: &[usize], limits: RouteLimi
     if options.iterations == 0 {
         return Err("iterations must be at least 1".into());
     }
-    if limits.max_stops == 0 || !(limits.max_length > 0.0) {
+    if limits.max_stops == 0 || limits.max_length.is_nan() || limits.max_length <= 0.0 {
         return Err("route limits must allow at least one stop".into());
     }
     let mut rng = Rng::new(options.seed);
@@ -321,7 +360,13 @@ pub fn grasp_routes(m: &Matrix, depot: usize, units: &[usize], limits: RouteLimi
         let lengths: Vec<f64> = routes.iter().map(|r| route_length(m, depot, r)).collect();
         let total: f64 = lengths.iter().sum();
         if best.as_ref().map_or(true, |b| total < b.total - 1e-12) {
-            best = Some(Solution { routes, lengths, total, lower_bound, best_iteration: it + 1 });
+            best = Some(Solution {
+                routes,
+                lengths,
+                total,
+                lower_bound,
+                best_iteration: it + 1,
+            });
         }
     }
     Ok(best.expect("at least one iteration"))
@@ -343,7 +388,18 @@ mod tests {
     fn tsp_on_a_square_is_optimal() {
         let m = square_points();
         let units: Vec<usize> = (1..9).collect();
-        let s = grasp_routes(&m, 0, &units, RouteLimits::default(), GraspOptions { iterations: 50, alpha: 0.3, seed: 3 }).unwrap();
+        let s = grasp_routes(
+            &m,
+            0,
+            &units,
+            RouteLimits::default(),
+            GraspOptions {
+                iterations: 50,
+                alpha: 0.3,
+                seed: 3,
+            },
+        )
+        .unwrap();
         assert_eq!(s.routes.len(), 1);
         // seven unit edges of the square plus the depot legs to the two ends of the
         // open path, which are adjacent: one midpoint (1) and one corner (sqrt 2)
@@ -357,7 +413,10 @@ mod tests {
     fn split_respects_limits() {
         let m = square_points();
         let units: Vec<usize> = (1..9).collect();
-        let limits = RouteLimits { max_length: f64::INFINITY, max_stops: 3 };
+        let limits = RouteLimits {
+            max_length: f64::INFINITY,
+            max_stops: 3,
+        };
         let s = grasp_routes(&m, 0, &units, limits, GraspOptions::default()).unwrap();
         assert!(s.routes.len() >= 3);
         assert!(s.routes.iter().all(|r| r.len() <= 3));
@@ -365,21 +424,46 @@ mod tests {
         all.sort();
         assert_eq!(all, units);
         // a corner alone needs 2 * sqrt(2) = 2.83, so 3.0 is feasible and 2.5 is not
-        let limits = RouteLimits { max_length: 3.0, max_stops: usize::MAX };
+        let limits = RouteLimits {
+            max_length: 3.0,
+            max_stops: usize::MAX,
+        };
         let s = grasp_routes(&m, 0, &units, limits, GraspOptions::default()).unwrap();
         assert!(s.lengths.iter().all(|&l| l <= 3.0 + 1e-9));
-        let limits = RouteLimits { max_length: 2.5, max_stops: usize::MAX };
+        let limits = RouteLimits {
+            max_length: 2.5,
+            max_stops: usize::MAX,
+        };
         assert!(grasp_routes(&m, 0, &units, limits, GraspOptions::default()).is_err());
-        let limits = RouteLimits { max_length: 1.0, max_stops: usize::MAX };
+        let limits = RouteLimits {
+            max_length: 1.0,
+            max_stops: usize::MAX,
+        };
         assert!(grasp_routes(&m, 0, &units, limits, GraspOptions::default()).is_err());
     }
 
     #[test]
     fn invalid_input_is_refused() {
         let m = square_points();
-        assert!(grasp_routes(&m, 0, &[0, 1], RouteLimits::default(), GraspOptions::default()).is_err());
-        assert!(grasp_routes(&m, 0, &[1, 1], RouteLimits::default(), GraspOptions::default()).is_err());
-        assert!(grasp_routes(&m, 9, &[1], RouteLimits::default(), GraspOptions::default()).is_err());
+        assert!(grasp_routes(
+            &m,
+            0,
+            &[0, 1],
+            RouteLimits::default(),
+            GraspOptions::default()
+        )
+        .is_err());
+        assert!(grasp_routes(
+            &m,
+            0,
+            &[1, 1],
+            RouteLimits::default(),
+            GraspOptions::default()
+        )
+        .is_err());
+        assert!(
+            grasp_routes(&m, 9, &[1], RouteLimits::default(), GraspOptions::default()).is_err()
+        );
         assert!(grasp_routes(&m, 0, &[], RouteLimits::default(), GraspOptions::default()).is_err());
     }
 
@@ -387,7 +471,11 @@ mod tests {
     fn deterministic_for_a_seed() {
         let m = square_points();
         let units: Vec<usize> = (1..9).collect();
-        let o = GraspOptions { iterations: 20, alpha: 0.5, seed: 11 };
+        let o = GraspOptions {
+            iterations: 20,
+            alpha: 0.5,
+            seed: 11,
+        };
         let a = grasp_routes(&m, 0, &units, RouteLimits::default(), o).unwrap();
         let b = grasp_routes(&m, 0, &units, RouteLimits::default(), o).unwrap();
         assert_eq!(a.routes, b.routes);

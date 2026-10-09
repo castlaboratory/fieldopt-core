@@ -16,7 +16,9 @@ use crate::rng::Rng;
 pub fn inclusion_probabilities(size: &[f64], n: usize) -> Result<Vec<f64>, String> {
     let big_n = size.len();
     if n == 0 || n > big_n {
-        return Err(format!("sample size {n} must be between 1 and the population size {big_n}"));
+        return Err(format!(
+            "sample size {n} must be between 1 and the population size {big_n}"
+        ));
     }
     if size.iter().any(|&s| !s.is_finite() || s < 0.0) {
         return Err("sizes must be finite and non-negative".into());
@@ -34,7 +36,11 @@ pub fn inclusion_probabilities(size: &[f64], n: usize) -> Result<Vec<f64>, Strin
             if fixed[i] {
                 continue;
             }
-            pi[i] = if total > 0.0 { remaining_n * size[i] / total } else { 0.0 };
+            pi[i] = if total > 0.0 {
+                remaining_n * size[i] / total
+            } else {
+                0.0
+            };
             if pi[i] >= 1.0 {
                 pi[i] = 1.0;
                 fixed[i] = true;
@@ -60,7 +66,9 @@ pub fn inclusion_probabilities(size: &[f64], n: usize) -> Result<Vec<f64>, Strin
 /// Squared distance between rows `i` and `j` of a coordinate matrix with `d`
 /// columns stored row-major.
 fn sq_dist(coords: &[f64], d: usize, i: usize, j: usize) -> f64 {
-    (0..d).map(|k| (coords[i * d + k] - coords[j * d + k]).powi(2)).sum()
+    (0..d)
+        .map(|k| (coords[i * d + k] - coords[j * d + k]).powi(2))
+        .sum()
 }
 
 /// Local pivotal method 2. `coords` is an `n x d` row-major matrix; `pi` the
@@ -68,9 +76,15 @@ fn sq_dist(coords: &[f64], d: usize, i: usize, j: usize) -> f64 {
 pub fn local_pivotal(coords: &[f64], d: usize, pi: &[f64], seed: u64) -> Result<Vec<bool>, String> {
     let n = pi.len();
     if d == 0 || coords.len() != n * d {
-        return Err(format!("coords must be an {n} x {d} matrix (got {} values)", coords.len()));
+        return Err(format!(
+            "coords must be an {n} x {d} matrix (got {} values)",
+            coords.len()
+        ));
     }
-    if pi.iter().any(|&p| !p.is_finite() || !(0.0..=1.0).contains(&p)) {
+    if pi
+        .iter()
+        .any(|&p| !p.is_finite() || !(0.0..=1.0).contains(&p))
+    {
         return Err("inclusion probabilities must lie in [0, 1]".into());
     }
     let mut p = pi.to_vec();
@@ -142,7 +156,9 @@ mod tests {
     #[test]
     fn lpm_has_the_right_size_and_inclusion_rates() {
         let n = 40;
-        let coords: Vec<f64> = (0..n).flat_map(|i| vec![(i % 8) as f64, (i / 8) as f64]).collect();
+        let coords: Vec<f64> = (0..n)
+            .flat_map(|i| vec![(i % 8) as f64, (i / 8) as f64])
+            .collect();
         let pi = vec![0.25; n];
         let mut counts = vec![0usize; n];
         let reps = 2000;

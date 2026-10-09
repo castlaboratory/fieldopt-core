@@ -10,7 +10,10 @@
 /// Horvitz-Thompson estimate of the total of `y` over the sampled units.
 pub fn ht_total(y: &[f64], pi: &[f64], sampled: &[bool]) -> Result<f64, String> {
     check(y, pi, sampled)?;
-    Ok((0..y.len()).filter(|&i| sampled[i]).map(|i| y[i] / pi[i]).sum())
+    Ok((0..y.len())
+        .filter(|&i| sampled[i])
+        .map(|i| y[i] / pi[i])
+        .sum())
 }
 
 fn check(y: &[f64], pi: &[f64], sampled: &[bool]) -> Result<(), String> {
@@ -31,7 +34,9 @@ fn check(y: &[f64], pi: &[f64], sampled: &[bool]) -> Result<(), String> {
 }
 
 fn sq_dist(coords: &[f64], d: usize, i: usize, j: usize) -> f64 {
-    (0..d).map(|k| (coords[i * d + k] - coords[j * d + k]).powi(2)).sum()
+    (0..d)
+        .map(|k| (coords[i * d + k] - coords[j * d + k]).powi(2))
+        .sum()
 }
 
 /// Local-mean variance estimator of the Horvitz-Thompson total for a
@@ -40,7 +45,13 @@ fn sq_dist(coords: &[f64], d: usize, i: usize, j: usize) -> f64 {
 /// probabilities reaches one; the estimator is
 /// `sum_i n_i / (n_i - 1) * (y_i / pi_i - mean_{j in N_i} y_j / pi_j)^2`.
 /// `coords` is the `N x d` row-major coordinate matrix of the population.
-pub fn local_mean_variance(coords: &[f64], d: usize, y: &[f64], pi: &[f64], sampled: &[bool]) -> Result<f64, String> {
+pub fn local_mean_variance(
+    coords: &[f64],
+    d: usize,
+    y: &[f64],
+    pi: &[f64],
+    sampled: &[bool],
+) -> Result<f64, String> {
     check(y, pi, sampled)?;
     let n = y.len();
     if d == 0 || coords.len() != n * d {
@@ -52,7 +63,11 @@ pub fn local_mean_variance(coords: &[f64], d: usize, y: &[f64], pi: &[f64], samp
     }
     let mut total = 0.0;
     for &i in &s {
-        let mut others: Vec<(f64, usize)> = s.iter().filter(|&&j| j != i).map(|&j| (sq_dist(coords, d, i, j), j)).collect();
+        let mut others: Vec<(f64, usize)> = s
+            .iter()
+            .filter(|&&j| j != i)
+            .map(|&j| (sq_dist(coords, d, i, j), j))
+            .collect();
         others.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         let mut members = vec![i];
         let mut pi_sum = pi[i];
@@ -65,7 +80,16 @@ pub fn local_mean_variance(coords: &[f64], d: usize, y: &[f64], pi: &[f64], samp
         }
         if members.len() < 2 {
             // isolated unit with pi >= 1: take its nearest neighbour anyway
-            let j = s.iter().filter(|&&j| j != i).min_by(|&&a, &&b| sq_dist(coords, d, i, a).partial_cmp(&sq_dist(coords, d, i, b)).unwrap()).copied().unwrap();
+            let j = s
+                .iter()
+                .filter(|&&j| j != i)
+                .min_by(|&&a, &&b| {
+                    sq_dist(coords, d, i, a)
+                        .partial_cmp(&sq_dist(coords, d, i, b))
+                        .unwrap()
+                })
+                .copied()
+                .unwrap();
             members.push(j);
         }
         let ni = members.len() as f64;
@@ -103,7 +127,9 @@ mod tests {
     #[test]
     fn ht_is_unbiased_under_lpm() {
         let n = 60;
-        let coords: Vec<f64> = (0..n).flat_map(|i| vec![(i % 10) as f64, (i / 10) as f64]).collect();
+        let coords: Vec<f64> = (0..n)
+            .flat_map(|i| vec![(i % 10) as f64, (i / 10) as f64])
+            .collect();
         let y: Vec<f64> = (0..n).map(|i| 1.0 + (i % 10) as f64 * 0.5).collect();
         let pi = vec![0.3; n];
         let truth: f64 = y.iter().sum();
@@ -116,7 +142,10 @@ mod tests {
             var_est += local_mean_variance(&coords, 2, &y, &pi, &sampled).unwrap();
         }
         let mean = sum / reps as f64;
-        assert!((mean - truth).abs() / truth < 0.01, "mean {mean} truth {truth}");
+        assert!(
+            (mean - truth).abs() / truth < 0.01,
+            "mean {mean} truth {truth}"
+        );
         assert!(var_est / reps as f64 > 0.0);
     }
 
