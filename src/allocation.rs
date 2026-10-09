@@ -127,7 +127,60 @@ pub fn allocate_for_budget(strata: &[Stratum], budget: f64) -> Result<Allocation
         .iter()
         .map(|s| budget * s.size as f64 * s.sd / s.cost.sqrt() / a)
         .collect();
-    Ok(finish(strata, &raw))
+    let mut a = finish(strata, &raw);
+    repair_budget(strata, budget, &mut a);
+    Ok(a)
+}
+
+/// Rounding can push the cost above the budget; drop units, one at a time,
+/// from the stratum whose unit removal raises the variance least per unit of
+/// cost saved, keeping `n_h >= 2`, until the cost fits. Then add units back
+/// greedily while they still fit.
+fn repair_budget(strata: &[Stratum], budget: f64, a: &mut Allocation) {
+    let gain = |n: &[usize], h: usize, delta: i64| -> f64 {
+        let mut m = n.to_vec();
+        m[h] = (m[h] as i64 + delta) as usize;
+        variance_of(strata, &m)
+    };
+    while a.cost > budget + 1e-9 {
+        let mut best: Option<(usize, f64)> = None;
+        for (h, s) in strata.iter().enumerate() {
+            if a.n[h] > 2 {
+                let rate = (gain(&a.n, h, -1) - a.variance) / s.cost;
+                if best.map_or(true, |(_, r)| rate < r) {
+                    best = Some((h, rate));
+                }
+            }
+        }
+        match best {
+            Some((h, _)) => {
+                a.n[h] -= 1;
+                a.cost -= strata[h].cost;
+                a.variance = variance_of(strata, &a.n);
+                a.bounded = true;
+            }
+            None => break,
+        }
+    }
+    loop {
+        let mut best: Option<(usize, f64)> = None;
+        for (h, s) in strata.iter().enumerate() {
+            if a.n[h] < s.size && a.cost + s.cost <= budget + 1e-9 {
+                let rate = (a.variance - gain(&a.n, h, 1)) / s.cost;
+                if best.map_or(true, |(_, r)| rate > r) {
+                    best = Some((h, rate));
+                }
+            }
+        }
+        match best {
+            Some((h, _)) => {
+                a.n[h] += 1;
+                a.cost += strata[h].cost;
+                a.variance = variance_of(strata, &a.n);
+            }
+            None => break,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -158,6 +211,29 @@ mod tests {
         assert!(a.variance <= 1e6 * 1.05);
         let b = allocate_for_budget(&strata, a.cost).unwrap();
         assert!((b.variance - a.variance).abs() / a.variance < 0.05);
+        assert!(
+            b.cost <= a.cost + 1e-9,
+            "cost {} exceeds budget {}",
+            b.cost,
+            a.cost
+        );
+        let c = allocate_for_budget(
+            &[
+                Stratum {
+                    size: 2000,
+                    sd: 12.0,
+                    cost: 40.0,
+                },
+                Stratum {
+                    size: 800,
+                    sd: 30.0,
+                    cost: 180.0,
+                },
+            ],
+            20000.0,
+        )
+        .unwrap();
+        assert!(c.cost <= 20000.0 && c.cost > 19600.0, "cost {}", c.cost);
         assert!(allocate_for_variance(&strata, -1.0).is_err());
         assert!(allocate_for_variance(
             &[Stratum {
