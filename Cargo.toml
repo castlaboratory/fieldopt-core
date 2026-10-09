@@ -1,0 +1,19 @@
+[package]
+name = "fieldopt-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+authors = ["André Leite <leite@castlab.org>", "Raydonal Ospina <raydonal@castlab.org>", "Cristiano Ferraz <cferraz@castlab.org>"]
+license = "GPL-3.0-or-later"
+description = "Field-survey design under real field cost: travel matrices, GRASP routing of field work (TSP/VRP), spatially balanced sampling (local pivotal method), Horvitz-Thompson estimation with local-mean variance, and cost-aware allocation. Pure Rust, no dependencies."
+repository = "https://github.com/castlaboratory/fieldopt-core"
+homepage = "https://github.com/castlaboratory/fieldopt-core"
+documentation = "https://docs.rs/fieldopt-core"
+readme = "README.md"
+keywords = ["survey", "sampling", "routing", "grasp", "statistics"]
+categories = ["science", "algorithms", "mathematics"]
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
