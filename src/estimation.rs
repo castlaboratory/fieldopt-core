@@ -61,6 +61,9 @@ pub fn local_mean_variance(
     if s.len() < 2 {
         return Err("at least two sampled units are needed".into());
     }
+    if coords.iter().any(|v| !v.is_finite()) {
+        return Err("coordinates must be finite".into());
+    }
     let mut total = 0.0;
     for &i in &s {
         let mut others: Vec<(f64, usize)> = s
@@ -86,7 +89,7 @@ pub fn local_mean_variance(
                 .min_by(|&&a, &&b| {
                     sq_dist(coords, d, i, a)
                         .partial_cmp(&sq_dist(coords, d, i, b))
-                        .unwrap()
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .copied()
                 .unwrap();

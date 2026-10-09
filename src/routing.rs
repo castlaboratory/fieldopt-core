@@ -9,8 +9,15 @@
 //! optimally into routes that respect the limits by the dynamic programme of
 //! Prins (2004), and routes are improved again individually. Heuristics do not
 //! certify optimality; [`Solution::gap_to_bound`] reports the gap to a cheap
-//! lower bound (the one-tree bound is not computed; the bound used is the sum
-//! of each unit's two shortest edges divided by two, a classical TSP bound).
+//! lower bound: half the sum, over the depot and the units, of the cheapest
+//! incoming and the cheapest outgoing edge at each node (valid for any number
+//! of routes and for asymmetric matrices) or, for a symmetric matrix and
+//! limits that allow a single route, the larger classical bound of the two
+//! cheapest distinct edges at each node.
+//!
+//! Travel matrices may be asymmetric (road networks with one-way streets or
+//! different durations by direction): the local search prices every move in
+//! the direction travelled.
 
 use crate::distance::Matrix;
 use crate::rng::Rng;
@@ -66,8 +73,7 @@ pub struct Solution {
     /// Total travel cost.
     pub total: f64,
     /// A lower bound on the total cost of any solution visiting the same units
-    /// with one route (half the sum of the two cheapest edges at each node,
-    /// depot included).
+    /// under the same limits (see the module documentation).
     pub lower_bound: f64,
     /// Iteration at which the best solution was found.
     pub best_iteration: usize,
@@ -108,6 +114,10 @@ fn validate(m: &Matrix, depot: usize, units: &[usize]) -> Result<(), String> {
 }
 
 /// Cost of a route: depot -> units in order -> depot.
+///
+/// # Panics
+///
+/// Panics when `depot` or an element of `route` is not an index of `m`.
 pub fn route_length(m: &Matrix, depot: usize, route: &[usize]) -> f64 {
     if route.is_empty() {
         return 0.0;
@@ -117,6 +127,50 @@ pub fn route_length(m: &Matrix, depot: usize, route: &[usize]) -> f64 {
         total += m.get(w[0], w[1]);
     }
     total + m.get(route[route.len() - 1], depot)
+}
+
+/// Whether `m(i, j) == m(j, i)` for every pair.
+fn is_symmetric(m: &Matrix) -> bool {
+    let n = m.len();
+    (0..n).all(|i| (i + 1..n).all(|j| (m.get(i, j) - m.get(j, i)).abs() <= 1e-12))
+}
+
+/// Half the sum of the cheapest incoming and cheapest outgoing edge at each
+/// node: every node of a solution has one incoming and one outgoing edge
+/// (the depot at least one of each), so this bounds any number of routes.
+fn in_out_bound(m: &Matrix, depot: usize, units: &[usize]) -> f64 {
+    let mut nodes: Vec<usize> = Vec::with_capacity(units.len() + 1);
+    nodes.push(depot);
+    nodes.extend_from_slice(units);
+    let mut sum = 0.0;
+    for &i in &nodes {
+        let (mut min_out, mut min_in) = (f64::INFINITY, f64::INFINITY);
+        for &j in &nodes {
+            if i != j {
+                min_out = min_out.min(m.get(i, j));
+                min_in = min_in.min(m.get(j, i));
+            }
+        }
+        sum += min_out + min_in;
+    }
+    sum / 2.0
+}
+
+/// Lower bound used in the solution (see the module documentation).
+fn lower_bound(
+    m: &Matrix,
+    depot: usize,
+    units: &[usize],
+    limits: &RouteLimits,
+    symmetric: bool,
+) -> f64 {
+    let general = in_out_bound(m, depot, units);
+    let single_route = limits.max_length.is_infinite() && limits.max_stops >= units.len();
+    if symmetric && single_route {
+        general.max(two_edge_bound(m, depot, units))
+    } else {
+        general
+    }
 }
 
 fn two_edge_bound(m: &Matrix, depot: usize, units: &[usize]) -> f64 {
@@ -173,8 +227,23 @@ fn construct(m: &Matrix, depot: usize, units: &[usize], alpha: f64, rng: &mut Rn
     tour
 }
 
+/// Cumulative cost of the tour's internal edges forwards (`fwd[k]`: edges
+/// before position `k`) and backwards (`bwd[k]`: the same edges reversed).
+fn prefix_costs(m: &Matrix, tour: &[usize]) -> (Vec<f64>, Vec<f64>) {
+    let n = tour.len();
+    let mut fwd = vec![0.0; n];
+    let mut bwd = vec![0.0; n];
+    for k in 1..n {
+        fwd[k] = fwd[k - 1] + m.get(tour[k - 1], tour[k]);
+        bwd[k] = bwd[k - 1] + m.get(tour[k], tour[k - 1]);
+    }
+    (fwd, bwd)
+}
+
 /// 2-opt improvement of an open tour anchored at the depot on both ends.
-fn two_opt(m: &Matrix, depot: usize, tour: &mut [usize]) -> bool {
+/// Reversing `tour[i..=j]` also reverses its internal edges, which matters
+/// on asymmetric matrices: that cost is included through prefix sums.
+fn two_opt(m: &Matrix, depot: usize, tour: &mut [usize], symmetric: bool) -> bool {
     let n = tour.len();
     if n < 3 {
         return false;
@@ -190,17 +259,28 @@ fn two_opt(m: &Matrix, depot: usize, tour: &mut [usize]) -> bool {
     let mut improved = true;
     while improved {
         improved = false;
-        for i in 0..n - 1 {
+        let (fwd, bwd) = if symmetric {
+            (Vec::new(), Vec::new())
+        } else {
+            prefix_costs(m, tour)
+        };
+        'scan: for i in 0..n - 1 {
             for j in (i + 1)..n {
                 let a = node(tour, i as isize - 1);
                 let b = tour[i];
                 let c = tour[j];
                 let d = node(tour, j as isize + 1);
-                let delta = m.get(a, c) + m.get(b, d) - m.get(a, b) - m.get(c, d);
+                let mut delta = m.get(a, c) + m.get(b, d) - m.get(a, b) - m.get(c, d);
+                if !symmetric {
+                    delta += (bwd[j] - bwd[i]) - (fwd[j] - fwd[i]);
+                }
                 if delta < -1e-12 {
                     tour[i..=j].reverse();
                     improved = true;
                     improved_any = true;
+                    if !symmetric {
+                        break 'scan; // prefix sums are stale: rescan
+                    }
                 }
             }
         }
@@ -208,8 +288,10 @@ fn two_opt(m: &Matrix, depot: usize, tour: &mut [usize]) -> bool {
     improved_any
 }
 
-/// Or-opt: move segments of 1 to 3 consecutive units elsewhere in the tour.
-fn or_opt(m: &Matrix, depot: usize, tour: &mut Vec<usize>) -> bool {
+/// Or-opt: move segments of 1 to 3 consecutive units elsewhere in the tour,
+/// possibly reversed. On asymmetric matrices a reversed segment also changes
+/// the cost of its internal edges, which is priced in.
+fn or_opt(m: &Matrix, depot: usize, tour: &mut Vec<usize>, symmetric: bool) -> bool {
     let mut improved_any = false;
     let mut improved = true;
     while improved {
@@ -238,7 +320,12 @@ fn or_opt(m: &Matrix, depot: usize, tour: &mut Vec<usize>) -> bool {
                         } else {
                             (first, last)
                         };
-                        let insert_cost = m.get(a, f) + m.get(l, b) - m.get(a, b);
+                        let mut insert_cost = m.get(a, f) + m.get(l, b) - m.get(a, b);
+                        if reversed && !symmetric {
+                            for w in tour[i..i + seg].windows(2) {
+                                insert_cost += m.get(w[1], w[0]) - m.get(w[0], w[1]);
+                            }
+                        }
                         if insert_cost < removal_gain - 1e-12 {
                             let mut segment: Vec<usize> = tour[i..i + seg].to_vec();
                             if reversed {
@@ -261,13 +348,23 @@ fn or_opt(m: &Matrix, depot: usize, tour: &mut Vec<usize>) -> bool {
     improved_any
 }
 
-fn local_search(m: &Matrix, depot: usize, tour: &mut Vec<usize>) {
+/// Alternate 2-opt and Or-opt until neither improves. Every accepted move
+/// strictly shortens the tour, so this terminates; as a safety net against
+/// floating-point drift the loop also stops when the measured length no
+/// longer decreases.
+fn local_search(m: &Matrix, depot: usize, tour: &mut Vec<usize>, symmetric: bool) {
+    let mut length = route_length(m, depot, tour);
     loop {
-        let a = two_opt(m, depot, tour);
-        let b = or_opt(m, depot, tour);
+        let a = two_opt(m, depot, tour, symmetric);
+        let b = or_opt(m, depot, tour, symmetric);
         if !a && !b {
             break;
         }
+        let now = route_length(m, depot, tour);
+        if now >= length - 1e-12 {
+            break;
+        }
+        length = now;
     }
 }
 
@@ -343,18 +440,19 @@ pub fn grasp_routes(
         return Err("route limits must allow at least one stop".into());
     }
     let mut rng = Rng::new(options.seed);
-    let lower_bound = two_edge_bound(m, depot, units);
+    let symmetric = is_symmetric(m);
+    let lower_bound = lower_bound(m, depot, units, &limits, symmetric);
     let mut best: Option<Solution> = None;
     for it in 0..options.iterations {
         let mut tour = construct(m, depot, units, options.alpha, &mut rng);
-        local_search(m, depot, &mut tour);
+        local_search(m, depot, &mut tour, symmetric);
         let mut routes = match split(m, depot, &tour, &limits) {
             Some(r) => r,
             None => return Err("some unit cannot be served within the route limits".into()),
         };
         if routes.len() > 1 {
             for r in routes.iter_mut() {
-                local_search(m, depot, r);
+                local_search(m, depot, r, symmetric);
             }
         }
         let lengths: Vec<f64> = routes.iter().map(|r| route_length(m, depot, r)).collect();
@@ -465,6 +563,88 @@ mod tests {
             grasp_routes(&m, 9, &[1], RouteLimits::default(), GraspOptions::default()).is_err()
         );
         assert!(grasp_routes(&m, 0, &[], RouteLimits::default(), GraspOptions::default()).is_err());
+    }
+
+    #[test]
+    fn asymmetric_matrices_terminate_and_respect_the_bound() {
+        // random asymmetric costs: the old symmetric deltas cycled forever here
+        let n = 9;
+        let mut rng = Rng::new(0);
+        let data: Vec<f64> = (0..n * n)
+            .map(|k| {
+                if k % (n + 1) == 0 {
+                    0.0
+                } else {
+                    1.0 + 9.0 * rng.next_f64()
+                }
+            })
+            .collect();
+        let m = Matrix::from_vec(n, data).unwrap();
+        let units: Vec<usize> = (1..n).collect();
+        let o = GraspOptions {
+            iterations: 30,
+            alpha: 0.3,
+            seed: 1,
+        };
+        let s = grasp_routes(&m, 0, &units, RouteLimits::default(), o).unwrap();
+        assert!(s.total >= s.lower_bound - 1e-9);
+        assert!((route_length(&m, 0, &s.routes[0]) - s.total).abs() < 1e-9);
+        // brute force over all 8! tours for the optimum
+        fn permutations(items: &[usize]) -> Vec<Vec<usize>> {
+            if items.len() <= 1 {
+                return vec![items.to_vec()];
+            }
+            let mut out = Vec::new();
+            for (k, &x) in items.iter().enumerate() {
+                let mut rest = items.to_vec();
+                rest.remove(k);
+                for mut p in permutations(&rest) {
+                    p.insert(0, x);
+                    out.push(p);
+                }
+            }
+            out
+        }
+        let opt = permutations(&units)
+            .iter()
+            .map(|p| route_length(&m, 0, p))
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            opt >= s.lower_bound - 1e-9,
+            "bound {} above optimum {opt}",
+            s.lower_bound
+        );
+        assert!(s.total <= opt * 1.15, "grasp {} vs optimum {opt}", s.total);
+        // a directed 3-cycle of cost 3 with expensive reverse edges
+        let data = vec![0.0, 1.0, 100.0, 100.0, 0.0, 1.0, 1.0, 100.0, 0.0];
+        let m = Matrix::from_vec(3, data).unwrap();
+        let s = grasp_routes(&m, 0, &[1, 2], RouteLimits::default(), o).unwrap();
+        assert!((s.total - 3.0).abs() < 1e-9);
+        assert!(s.lower_bound <= 3.0 + 1e-9);
+    }
+
+    #[test]
+    fn bound_is_valid_with_several_routes_without_triangle_inequality() {
+        // depot legs cost 0, unit-unit legs 100: one-stop routes cost 0 in total
+        let n = 4;
+        let data: Vec<f64> = (0..n * n)
+            .map(|k| {
+                let (i, j) = (k / n, k % n);
+                if i == j || i == 0 || j == 0 {
+                    0.0
+                } else {
+                    100.0
+                }
+            })
+            .collect();
+        let m = Matrix::from_vec(n, data).unwrap();
+        let limits = RouteLimits {
+            max_length: f64::INFINITY,
+            max_stops: 1,
+        };
+        let s = grasp_routes(&m, 0, &[1, 2, 3], limits, GraspOptions::default()).unwrap();
+        assert!(s.total.abs() < 1e-12);
+        assert!(s.lower_bound <= s.total + 1e-12);
     }
 
     #[test]

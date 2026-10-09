@@ -1,6 +1,6 @@
 [package]
 name = "fieldopt-core"
-version = "0.2.3"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.70"
 authors = ["André Leite <leite@castlab.org>", "Raydonal Ospina <raydonal@castlab.org>", "Cristiano Ferraz <cferraz@castlab.org>"]

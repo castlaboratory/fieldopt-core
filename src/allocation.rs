@@ -70,7 +70,7 @@ fn finish(strata: &[Stratum], raw: &[f64]) -> Allocation {
         .map(|(s, &r)| {
             let up = (r - 1e-9).ceil();
             let v = up.max(2.0).min(s.size as f64);
-            if (v - up).abs() > 1e-9 {
+            if r < 2.0 - 1e-9 || r > s.size as f64 + 1e-9 {
                 bounded = true;
             }
             v as usize
@@ -135,10 +135,22 @@ pub fn allocate_for_variance(
     Ok(out)
 }
 
+/// Allocation of minimum variance for a budget (cost-optimal allocation of
+/// Cochran 1977, Section 5.5, with the cost function `sum c_h n_h`). Strata
+/// whose optimum exceeds their size are taken completely and the rest is
+/// re-solved; every stratum keeps at least two units (one when it has a
+/// single unit), and the budget must cover that floor. Rounding is repaired
+/// so that the cost stays within the budget.
 pub fn allocate_for_budget(strata: &[Stratum], budget: f64) -> Result<Allocation, String> {
     validate(strata)?;
     if !budget.is_finite() || budget <= 0.0 {
         return Err("the budget must be positive".into());
+    }
+    let floor_cost: f64 = strata.iter().map(|s| s.cost * (s.size.min(2)) as f64).sum();
+    if floor_cost > budget + 1e-9 {
+        return Err(format!(
+            "the budget {budget} does not cover two units per stratum (cost {floor_cost})"
+        ));
     }
     let h = strata.len();
     let a_all: f64 = strata
@@ -247,6 +259,29 @@ fn repair_budget(strata: &[Stratum], budget: f64, a: &mut Allocation) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn budget_below_the_floor_is_refused_and_small_optima_are_flagged() {
+        let s = [Stratum {
+            size: 10,
+            sd: 1.0,
+            cost: 10.0,
+        }];
+        assert!(allocate_for_budget(&s, 5.0).is_err());
+        let a = allocate_for_budget(&s, 20.0).unwrap();
+        assert_eq!(a.n, vec![2]);
+        assert!(a.cost <= 20.0 + 1e-9);
+        // raw optimum 1.5 rounds to 2 and is reported as bounded
+        let one = [Stratum {
+            size: 100,
+            sd: 1.0,
+            cost: 1.0,
+        }];
+        let v = 100.0f64.powi(2) / 1.5 * (1.0 - 1.5 / 100.0);
+        let a = allocate_for_variance(&one, v).unwrap();
+        assert_eq!(a.n, vec![2]);
+        assert!(a.bounded);
+    }
 
     #[test]
     fn neyman_with_cost() {

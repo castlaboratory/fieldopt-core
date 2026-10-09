@@ -30,6 +30,9 @@
 //! assert!(sol.total >= sol.lower_bound);
 //! ```
 
+/// Version of this crate, for reports.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod allocation;
 pub mod distance;
 pub mod dualframe;

@@ -23,8 +23,11 @@ pub fn inclusion_probabilities(size: &[f64], n: usize) -> Result<Vec<f64>, Strin
     if size.iter().any(|&s| !s.is_finite() || s < 0.0) {
         return Err("sizes must be finite and non-negative".into());
     }
-    if size.iter().sum::<f64>() <= 0.0 {
-        return Err("sizes must not all be zero".into());
+    let positive = size.iter().filter(|&&s| s > 0.0).count();
+    if positive < n {
+        return Err(format!(
+            "only {positive} units have a positive size, fewer than the sample size {n}"
+        ));
     }
     let mut pi = vec![0.0; big_n];
     let mut fixed = vec![false; big_n];
@@ -87,6 +90,9 @@ pub fn local_pivotal(coords: &[f64], d: usize, pi: &[f64], seed: u64) -> Result<
     {
         return Err("inclusion probabilities must lie in [0, 1]".into());
     }
+    if coords.iter().any(|v| !v.is_finite()) {
+        return Err("coordinates must be finite".into());
+    }
     let mut p = pi.to_vec();
     let mut rng = Rng::new(seed);
     let undecided = |p: &[f64], i: usize| p[i] > 1e-12 && p[i] < 1.0 - 1e-12;
@@ -142,6 +148,15 @@ pub fn local_pivotal(coords: &[f64], d: usize, pi: &[f64], seed: u64) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn degenerate_inputs_are_refused() {
+        assert!(inclusion_probabilities(&[1.0, 0.0, 0.0], 2).is_err());
+        assert!(inclusion_probabilities(&[0.0, 0.0], 1).is_err());
+        let pi = vec![0.5; 4];
+        let coords = vec![0.0, 0.0, 1.0, 0.0, f64::NAN, 1.0, 1.0, 1.0];
+        assert!(local_pivotal(&coords, 2, &pi, 1).is_err());
+    }
 
     #[test]
     fn probabilities_sum_to_n_and_cap_at_one() {

@@ -74,9 +74,12 @@ pub fn hilbert_order(coords: &[f64], bits: u32) -> Result<Vec<usize>, String> {
 /// systematic PPS sample with interval `replicates` and its own random
 /// start, so it holds about `n / replicates` units with inclusion
 /// probabilities `pi / replicates`; replicates are drawn independently and
-/// may share units. Returns the `n x replicates` row-major indicator matrix.
-/// With one replicate this is plain systematic PPS sampling of exactly `n`
-/// units with inclusion probabilities `pi`.
+/// may share units, so the union of the replicates has inclusion
+/// probabilities `1 - (1 - pi / r)^r`, not `pi`: estimate from each
+/// replicate with `pi / r` and average, or use the union probabilities.
+/// Returns the `n x replicates` row-major indicator matrix. With one
+/// replicate this is plain systematic PPS sampling of exactly `n` units with
+/// inclusion probabilities `pi`.
 pub fn systematic_replicates(
     order: &[usize],
     pi: &[f64],
@@ -86,6 +89,13 @@ pub fn systematic_replicates(
     let n = pi.len();
     if order.len() != n {
         return Err("order and pi must have the same length".into());
+    }
+    let mut seen = vec![false; n];
+    for &i in order {
+        if i >= n || seen[i] {
+            return Err("order must be a permutation of the unit indices".into());
+        }
+        seen[i] = true;
     }
     if replicates == 0 {
         return Err("at least one replicate is needed".into());
@@ -123,6 +133,14 @@ pub fn systematic_replicates(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn order_must_be_a_permutation() {
+        let pi = vec![0.5; 4];
+        assert!(systematic_replicates(&[0, 1, 2, 9], &pi, 1, 1).is_err());
+        assert!(systematic_replicates(&[0, 0, 1, 2], &pi, 1, 1).is_err());
+        assert!(systematic_replicates(&[3, 1, 0, 2], &pi, 1, 1).is_ok());
+    }
 
     #[test]
     fn hilbert_neighbours_are_close() {

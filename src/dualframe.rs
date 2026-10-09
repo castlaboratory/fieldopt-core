@@ -15,7 +15,8 @@
 
 use crate::allocation::{allocate_for_budget, allocate_for_variance, Stratum};
 
-/// Moments of the study variable in one domain.
+/// Moments of the study variable in one domain: number of units, mean and
+/// standard deviation `S` (divisor `size - 1`, as in Cochran).
 #[derive(Clone, Copy, Debug)]
 pub struct Domain {
     pub size: usize,
@@ -80,19 +81,19 @@ fn validate(f: &DualFrame) -> Result<(), String> {
     Ok(())
 }
 
-/// Population standard deviation (divisor N) of `y` times `w` over a frame
-/// made of two domains, where `w` is 1 in the first domain and `theta` in the
-/// overlap.
+/// Standard deviation `S` (divisor N - 1) of `y` times `w` over a frame made
+/// of two domains, where `w` is 1 in the first domain and `theta` in the
+/// overlap: the within-domain sums of squares `(N_d - 1) w_d^2 S_d^2` plus
+/// the between-domain part `N_d (w_d mu_d - mu)^2`, divided by `N - 1`.
 fn frame_sd(only: Domain, overlap: Domain, theta: f64) -> f64 {
-    let n = (only.size + overlap.size) as f64;
-    let m1 = (only.size as f64 * only.mean + overlap.size as f64 * theta * overlap.mean) / n;
-    let m2 = (only.size as f64 * (only.sd * only.sd + only.mean * only.mean)
-        + overlap.size as f64
-            * theta
-            * theta
-            * (overlap.sd * overlap.sd + overlap.mean * overlap.mean))
-        / n;
-    (m2 - m1 * m1).max(0.0).sqrt()
+    let (n1, n2) = (only.size as f64, overlap.size as f64);
+    let n = n1 + n2;
+    let (m1, m2) = (only.mean, theta * overlap.mean);
+    let mu = (n1 * m1 + n2 * m2) / n;
+    let within =
+        (n1 - 1.0) * only.sd * only.sd + (n2 - 1.0) * theta * theta * overlap.sd * overlap.sd;
+    let between = n1 * (m1 - mu).powi(2) + n2 * (m2 - mu).powi(2);
+    ((within + between) / (n - 1.0)).max(0.0).sqrt()
 }
 
 fn strata_for(f: &DualFrame, theta: f64) -> [Stratum; 2] {
@@ -262,20 +263,21 @@ mod tests {
 
     #[test]
     fn frame_sd_matches_direct_computation() {
-        // domain a: values {1, 3}; overlap: values {10, 20}; theta 0.5 -> {5, 10}
+        // domain a: values {1, 3} (S = sqrt 2); overlap: values {10, 20}
+        // (S = sqrt 50); theta 0.5 turns the overlap into {5, 10}
         let a = Domain {
             size: 2,
             mean: 2.0,
-            sd: 1.0,
+            sd: 2f64.sqrt(),
         };
         let ab = Domain {
             size: 2,
             mean: 15.0,
-            sd: 5.0,
+            sd: 50f64.sqrt(),
         };
         let vals = [1.0, 3.0, 5.0, 10.0];
         let m = vals.iter().sum::<f64>() / 4.0;
-        let sd = (vals.iter().map(|v| (v - m).powi(2)).sum::<f64>() / 4.0).sqrt();
+        let sd = (vals.iter().map(|v| (v - m).powi(2)).sum::<f64>() / 3.0).sqrt();
         assert!((frame_sd(a, ab, 0.5) - sd).abs() < 1e-12);
     }
 }
