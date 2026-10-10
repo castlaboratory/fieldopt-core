@@ -1,35 +1,44 @@
-//! Routing of field work: one team (a travelling-salesman tour from a depot)
-//! or several teams or days (vehicle routes with a maximum length and a
-//! maximum number of stops per route).
+//! Routing of field work: one team (a tour from a depot) or several teams
+//! or days (routes with a maximum duration, a maximum number of stops and a
+//! capacity).
 //!
-//! The solver is GRASP (Feo and Resende, 1995): each iteration builds a tour
-//! with a randomised greedy construction (restricted candidate list of the
-//! nearest unvisited units), improves it with 2-opt and Or-opt local search,
-//! and keeps the best. For several routes the improved giant tour is split
-//! optimally into routes that respect the limits by the dynamic programme of
-//! Prins (2004), and routes are improved again individually. Heuristics do not
-//! certify optimality; [`Solution::gap_to_bound`] reports the gap to a cheap
-//! lower bound: half the sum, over the depot and the units, of the cheapest
-//! incoming and the cheapest outgoing edge at each node (valid for any number
-//! of routes and for asymmetric matrices) or, for a symmetric matrix and
-//! limits that allow a single route, the larger classical bound of the two
-//! cheapest distinct edges at each node.
+//! [`solve_routes`] solves instances of up to [`crate::vrp::EXACT_MAX_UNITS`]
+//! units exactly by dynamic programming over subsets (Held and Karp 1962 for
+//! the tours, then an optimal partition into feasible routes). Larger
+//! instances go to a hybrid genetic search (Vidal 2022): a population of
+//! giant tours, order crossover, the optimal split of Prins (2004) under the
+//! limits, and a local search with granular neighbourhoods (Toth and Vigo
+//! 2003) made of 2-opt, Or-opt, relocate, swap and 2-opt* moves; the
+//! population is managed with a biased fitness that rewards diversity. The
+//! randomised nearest-neighbour construction of GRASP (Feo and Resende 1995)
+//! seeds the population.
+//!
+//! [`Solution::lower_bound`] is the optimum when the instance was solved
+//! exactly; otherwise, for a symmetric matrix and limits that allow a single
+//! tour, the Held-Karp 1-tree bound (Held and Karp 1971; typically within a
+//! few percent of the optimum, and valid as a bound on the routing problem
+//! under the triangle inequality); otherwise half the sum, over the depot
+//! and the units, of the cheapest incoming and outgoing edge at each node,
+//! valid for any number of routes and asymmetric matrices but loose.
 //!
 //! Travel matrices may be asymmetric (road networks with one-way streets or
-//! different durations by direction): the local search prices every move in
-//! the direction travelled.
+//! different durations by direction): every move is priced in the direction
+//! travelled.
 
 use crate::distance::Matrix;
 use crate::rng::Rng;
+use crate::vrp::{self, Instance, EXACT_MAX_UNITS};
 
 /// Limits of each route.
 #[derive(Clone, Copy, Debug)]
 pub struct RouteLimits {
-    /// Maximum travel cost of one route (including the return to the depot);
-    /// `f64::INFINITY` for none.
+    /// Maximum duration of one route: travel including the return to the
+    /// depot plus the service time of its units; `f64::INFINITY` for none.
     pub max_length: f64,
     /// Maximum number of units in one route; `usize::MAX` for none.
     pub max_stops: usize,
+    /// Maximum total demand of one route; `f64::INFINITY` for none.
+    pub capacity: f64,
 }
 
 impl Default for RouteLimits {
@@ -37,17 +46,20 @@ impl Default for RouteLimits {
         RouteLimits {
             max_length: f64::INFINITY,
             max_stops: usize::MAX,
+            capacity: f64::INFINITY,
         }
     }
 }
 
-/// Options of the GRASP solver.
+/// Options of the solver.
 #[derive(Clone, Copy, Debug)]
 pub struct GraspOptions {
-    /// Number of GRASP iterations.
+    /// Number of offspring of the genetic search (ignored when the instance
+    /// is solved exactly).
     pub iterations: usize,
-    /// Greediness of the construction in `[0, 1]`: 0 is pure greedy, 1 is
-    /// uniformly random among all candidates.
+    /// Greediness of the constructions that seed the population, in
+    /// `[0, 1]`: 0 is pure greedy, 1 is uniformly random among all
+    /// candidates.
     pub alpha: f64,
     /// Seed of the random generator.
     pub seed: u64,
@@ -73,12 +85,17 @@ pub struct Solution {
     /// Duration of each route: travel plus the service time of its units
     /// (equal to `lengths` when no service time is given).
     pub durations: Vec<f64>,
+    /// Total demand of each route (zero without demands).
+    pub loads: Vec<f64>,
     /// Total travel cost.
     pub total: f64,
     /// A lower bound on the total cost of any solution visiting the same units
     /// under the same limits (see the module documentation).
     pub lower_bound: f64,
-    /// Iteration at which the best solution was found.
+    /// Whether the solution is proven optimal (solved exactly, or the bound
+    /// meets the cost).
+    pub optimal: bool,
+    /// Iteration at which the best solution was found (0 when exact).
     pub best_iteration: usize,
 }
 
@@ -159,23 +176,6 @@ fn in_out_bound(m: &Matrix, depot: usize, units: &[usize]) -> f64 {
     sum / 2.0
 }
 
-/// Lower bound used in the solution (see the module documentation).
-fn lower_bound(
-    m: &Matrix,
-    depot: usize,
-    units: &[usize],
-    limits: &RouteLimits,
-    symmetric: bool,
-) -> f64 {
-    let general = in_out_bound(m, depot, units);
-    let single_route = limits.max_length.is_infinite() && limits.max_stops >= units.len();
-    if symmetric && single_route {
-        general.max(two_edge_bound(m, depot, units))
-    } else {
-        general
-    }
-}
-
 fn two_edge_bound(m: &Matrix, depot: usize, units: &[usize]) -> f64 {
     let mut nodes: Vec<usize> = Vec::with_capacity(units.len() + 1);
     nodes.push(depot);
@@ -208,7 +208,13 @@ fn two_edge_bound(m: &Matrix, depot: usize, units: &[usize]) -> f64 {
 }
 
 /// Randomised nearest-neighbour construction from the depot.
-fn construct(m: &Matrix, depot: usize, units: &[usize], alpha: f64, rng: &mut Rng) -> Vec<usize> {
+pub(crate) fn construct(
+    m: &Matrix,
+    depot: usize,
+    units: &[usize],
+    alpha: f64,
+    rng: &mut Rng,
+) -> Vec<usize> {
     let mut remaining: Vec<usize> = units.to_vec();
     let mut tour = Vec::with_capacity(units.len());
     let mut current = depot;
@@ -246,7 +252,7 @@ fn prefix_costs(m: &Matrix, tour: &[usize]) -> (Vec<f64>, Vec<f64>) {
 /// 2-opt improvement of an open tour anchored at the depot on both ends.
 /// Reversing `tour[i..=j]` also reverses its internal edges, which matters
 /// on asymmetric matrices: that cost is included through prefix sums.
-fn two_opt(m: &Matrix, depot: usize, tour: &mut [usize], symmetric: bool) -> bool {
+pub(crate) fn two_opt(m: &Matrix, depot: usize, tour: &mut [usize], symmetric: bool) -> bool {
     let n = tour.len();
     if n < 3 {
         return false;
@@ -294,7 +300,7 @@ fn two_opt(m: &Matrix, depot: usize, tour: &mut [usize], symmetric: bool) -> boo
 /// Or-opt: move segments of 1 to 3 consecutive units elsewhere in the tour,
 /// possibly reversed. On asymmetric matrices a reversed segment also changes
 /// the cost of its internal edges, which is priced in.
-fn or_opt(m: &Matrix, depot: usize, tour: &mut Vec<usize>, symmetric: bool) -> bool {
+pub(crate) fn or_opt(m: &Matrix, depot: usize, tour: &mut Vec<usize>, symmetric: bool) -> bool {
     let mut improved_any = false;
     let mut improved = true;
     while improved {
@@ -351,83 +357,22 @@ fn or_opt(m: &Matrix, depot: usize, tour: &mut Vec<usize>, symmetric: bool) -> b
     improved_any
 }
 
-/// Alternate 2-opt and Or-opt until neither improves. Every accepted move
-/// strictly shortens the tour, so this terminates; as a safety net against
-/// floating-point drift the loop also stops when the measured length no
-/// longer decreases.
-fn local_search(m: &Matrix, depot: usize, tour: &mut Vec<usize>, symmetric: bool) {
-    let mut length = route_length(m, depot, tour);
-    loop {
-        let a = two_opt(m, depot, tour, symmetric);
-        let b = or_opt(m, depot, tour, symmetric);
-        if !a && !b {
-            break;
-        }
-        let now = route_length(m, depot, tour);
-        if now >= length - 1e-12 {
-            break;
-        }
-        length = now;
+/// Lower bound used in the solution (see the module documentation).
+fn lower_bound(inst: &Instance, units: &[usize], upper: f64) -> (f64, bool) {
+    let general = in_out_bound(inst.m, inst.depot, units);
+    if inst.symmetric && inst.single_route_allowed(units) {
+        let (hk, is_tour) = vrp::held_karp_bound(inst.m, inst.depot, units, upper);
+        let b = general
+            .max(two_edge_bound(inst.m, inst.depot, units))
+            .max(hk);
+        (b.min(upper), is_tour || upper - b <= 1e-9 * upper.max(1.0))
+    } else {
+        (general.min(upper), false)
     }
 }
 
-/// Optimal split of a giant tour into routes respecting the limits (Prins 2004).
-/// Returns `None` if some unit cannot be served within the limits alone.
-fn split(
-    m: &Matrix,
-    depot: usize,
-    tour: &[usize],
-    service: &[f64],
-    limits: &RouteLimits,
-) -> Option<Vec<Vec<usize>>> {
-    let n = tour.len();
-    let mut cost = vec![f64::INFINITY; n + 1];
-    let mut pred = vec![usize::MAX; n + 1];
-    cost[0] = 0.0;
-    for i in 0..n {
-        if !cost[i].is_finite() {
-            continue;
-        }
-        let mut len = 0.0;
-        let mut served = 0.0;
-        for j in i..n {
-            if j - i + 1 > limits.max_stops {
-                break;
-            }
-            if j == i {
-                len = m.get(depot, tour[i]);
-            } else {
-                len += m.get(tour[j - 1], tour[j]);
-            }
-            served += service[tour[j]];
-            let route_cost = len + m.get(tour[j], depot);
-            if route_cost + served > limits.max_length {
-                break;
-            }
-            if cost[i] + route_cost < cost[j + 1] {
-                cost[j + 1] = cost[i] + route_cost;
-                pred[j + 1] = i;
-            }
-        }
-    }
-    if !cost[n].is_finite() {
-        return None;
-    }
-    let mut routes = Vec::new();
-    let mut j = n;
-    while j > 0 {
-        let i = pred[j];
-        routes.push(tour[i..j].to_vec());
-        j = i;
-    }
-    routes.reverse();
-    Some(routes)
-}
-
-/// Solve the routing of `units` from `depot` under `limits` with GRASP.
-///
-/// With default limits the result is a single tour (TSP). Returns an error
-/// for invalid indices or when a unit cannot be served within the limits.
+/// Solve the routing of `units` from `depot` under `limits` (see the module
+/// documentation). With default limits the result is a single tour.
 pub fn grasp_routes(
     m: &Matrix,
     depot: usize,
@@ -435,7 +380,7 @@ pub fn grasp_routes(
     limits: RouteLimits,
     options: GraspOptions,
 ) -> Result<Solution, String> {
-    grasp_routes_with_service(m, depot, units, &[], limits, options)
+    solve_routes(m, depot, units, &[], &[], limits, options)
 }
 
 /// Duration of a route: its travel plus the service time of its units.
@@ -447,11 +392,7 @@ pub fn route_duration(m: &Matrix, depot: usize, route: &[usize], service: &[f64]
             .sum::<f64>()
 }
 
-/// As [`grasp_routes`], with a service time per node of the matrix (time
-/// spent at each unit: interviews, measurements). `max_length` then limits
-/// the duration of a route, travel plus service, while the objective stays
-/// the total travel; `service` may be empty for none, and the depot's entry
-/// is ignored.
+/// As [`grasp_routes`], with a service time per node of the matrix.
 pub fn grasp_routes_with_service(
     m: &Matrix,
     depot: usize,
@@ -460,61 +401,105 @@ pub fn grasp_routes_with_service(
     limits: RouteLimits,
     options: GraspOptions,
 ) -> Result<Solution, String> {
+    solve_routes(m, depot, units, service, &[], limits, options)
+}
+
+/// Solve the routing of `units` from `depot`: `service` is the time spent at
+/// each node and `demand` the load each node adds to its route (both per
+/// node of the matrix, empty for none); `max_length` limits the duration of
+/// a route (travel plus service), `max_stops` its number of units and
+/// `capacity` its load. The objective is the total travel. Returns an error
+/// for invalid indices or when a unit cannot be served alone within the
+/// limits.
+pub fn solve_routes(
+    m: &Matrix,
+    depot: usize,
+    units: &[usize],
+    service: &[f64],
+    demand: &[f64],
+    limits: RouteLimits,
+    options: GraspOptions,
+) -> Result<Solution, String> {
     validate(m, depot, units)?;
-    if !service.is_empty() && service.len() != m.len() {
-        return Err("service must have one entry per node of the matrix".into());
-    }
-    if service.iter().any(|s| !s.is_finite() || *s < 0.0) {
-        return Err("service times must be finite and non-negative".into());
-    }
-    let service: Vec<f64> = if service.is_empty() {
-        vec![0.0; m.len()]
-    } else {
-        service.to_vec()
-    };
     if !(0.0..=1.0).contains(&options.alpha) {
         return Err("alpha must be in [0, 1]".into());
     }
     if options.iterations == 0 {
         return Err("iterations must be at least 1".into());
     }
-    if limits.max_stops == 0 || limits.max_length.is_nan() || limits.max_length <= 0.0 {
+    if limits.max_stops == 0
+        || limits.max_length.is_nan()
+        || limits.max_length <= 0.0
+        || limits.capacity.is_nan()
+        || limits.capacity < 0.0
+    {
         return Err("route limits must allow at least one stop".into());
     }
-    let mut rng = Rng::new(options.seed);
-    let symmetric = is_symmetric(m);
-    let lower_bound = lower_bound(m, depot, units, &limits, symmetric);
-    let mut best: Option<Solution> = None;
-    for it in 0..options.iterations {
-        let mut tour = construct(m, depot, units, options.alpha, &mut rng);
-        local_search(m, depot, &mut tour, symmetric);
-        let mut routes = match split(m, depot, &tour, &service, &limits) {
-            Some(r) => r,
-            None => return Err("some unit cannot be served within the route limits".into()),
-        };
-        if routes.len() > 1 {
-            for r in routes.iter_mut() {
-                local_search(m, depot, r, symmetric);
-            }
+    let n = m.len();
+    let check = |v: &[f64], what: &str| -> Result<Vec<f64>, String> {
+        if !v.is_empty() && v.len() != n {
+            return Err(format!("{what} must have one entry per node of the matrix"));
         }
-        let lengths: Vec<f64> = routes.iter().map(|r| route_length(m, depot, r)).collect();
-        let durations: Vec<f64> = routes
-            .iter()
-            .map(|r| route_duration(m, depot, r, &service))
-            .collect();
-        let total: f64 = lengths.iter().sum();
-        if best.as_ref().map_or(true, |b| total < b.total - 1e-12) {
-            best = Some(Solution {
-                routes,
-                lengths,
-                durations,
-                total,
-                lower_bound,
-                best_iteration: it + 1,
-            });
+        if v.iter().any(|x| !x.is_finite() || *x < 0.0) {
+            return Err(format!("{what} must be finite and non-negative"));
+        }
+        Ok(if v.is_empty() {
+            vec![0.0; n]
+        } else {
+            v.to_vec()
+        })
+    };
+    let service = check(service, "service times")?;
+    let demand = check(demand, "demands")?;
+    let symmetric = is_symmetric(m);
+    let inst = Instance::new(
+        m,
+        depot,
+        units,
+        service.clone(),
+        demand.clone(),
+        limits,
+        symmetric,
+    );
+    for &u in units {
+        if !inst.feasible(&[u]) {
+            return Err("some unit cannot be served within the route limits".into());
         }
     }
-    Ok(best.expect("at least one iteration"))
+    let mut rng = Rng::new(options.seed);
+    let (routes, total, best_iteration, optimal) = if units.len() <= EXACT_MAX_UNITS {
+        let (r, c) = vrp::exact(&inst, units)
+            .ok_or_else(|| "some unit cannot be served within the route limits".to_string())?;
+        (r, c, 0, true)
+    } else {
+        let (r, c, it) = vrp::hgs(&inst, units, options.iterations, options.alpha, &mut rng)
+            .ok_or_else(|| "some unit cannot be served within the route limits".to_string())?;
+        (r, c, it, false)
+    };
+    let (lower_bound, proven) = if optimal {
+        (total, true)
+    } else {
+        lower_bound(&inst, units, total)
+    };
+    let lengths: Vec<f64> = routes.iter().map(|r| route_length(m, depot, r)).collect();
+    let durations: Vec<f64> = routes
+        .iter()
+        .map(|r| route_duration(m, depot, r, &service))
+        .collect();
+    let loads: Vec<f64> = routes
+        .iter()
+        .map(|r| r.iter().map(|&u| demand[u]).sum())
+        .collect();
+    Ok(Solution {
+        routes,
+        lengths,
+        durations,
+        loads,
+        total,
+        lower_bound,
+        optimal: optimal || proven,
+        best_iteration,
+    })
 }
 
 #[cfg(test)]
@@ -561,6 +546,7 @@ mod tests {
         let limits = RouteLimits {
             max_length: f64::INFINITY,
             max_stops: 3,
+            capacity: f64::INFINITY,
         };
         let s = grasp_routes(&m, 0, &units, limits, GraspOptions::default()).unwrap();
         assert!(s.routes.len() >= 3);
@@ -572,17 +558,20 @@ mod tests {
         let limits = RouteLimits {
             max_length: 3.0,
             max_stops: usize::MAX,
+            capacity: f64::INFINITY,
         };
         let s = grasp_routes(&m, 0, &units, limits, GraspOptions::default()).unwrap();
         assert!(s.lengths.iter().all(|&l| l <= 3.0 + 1e-9));
         let limits = RouteLimits {
             max_length: 2.5,
             max_stops: usize::MAX,
+            capacity: f64::INFINITY,
         };
         assert!(grasp_routes(&m, 0, &units, limits, GraspOptions::default()).is_err());
         let limits = RouteLimits {
             max_length: 1.0,
             max_stops: usize::MAX,
+            capacity: f64::INFINITY,
         };
         assert!(grasp_routes(&m, 0, &units, limits, GraspOptions::default()).is_err());
     }
@@ -688,6 +677,7 @@ mod tests {
         let limits = RouteLimits {
             max_length: f64::INFINITY,
             max_stops: 1,
+            capacity: f64::INFINITY,
         };
         let s = grasp_routes(&m, 0, &[1, 2, 3], limits, GraspOptions::default()).unwrap();
         assert!(s.total.abs() < 1e-12);
@@ -702,6 +692,7 @@ mod tests {
         let limits = RouteLimits {
             max_length: 5.0,
             max_stops: usize::MAX,
+            capacity: f64::INFINITY,
         };
         let o = GraspOptions {
             iterations: 20,

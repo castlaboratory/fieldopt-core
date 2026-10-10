@@ -4,10 +4,15 @@ Field-survey design under real field cost, in pure Rust with no dependencies:
 
 - **Travel matrices** from coordinates (great-circle or Euclidean), or supplied
   by the user from a road network (for example OSRM).
-- **Routing of field work** with GRASP (randomised greedy construction, 2-opt
-  and Or-opt local search) for one tour or several routes under a maximum
-  length and number of stops (optimal split of the giant tour, Prins 2004),
-  with a lower bound and the gap to it.
+- **Routing of field work**: instances of up to 13 units are solved exactly
+  (dynamic programming over subsets); larger ones by a hybrid genetic search
+  (Vidal 2022) with the optimal split of Prins (2004) and a granular local
+  search (2-opt, Or-opt, relocate, swap, 2-opt*), under limits on route
+  duration (travel plus service time), stops and capacity, on symmetric or
+  asymmetric matrices. Optimal on the seven classical TSPLIB instances up to
+  101 nodes and within 1.2% of the optimum on the 27 Augerat set A CVRP
+  instances, in about one second each; the Held-Karp bound certifies single
+  tours.
 - **Spatially balanced sampling** with the local pivotal method (Grafström,
   Lundström and Schelin 2012) and size-proportional inclusion probabilities.
 - **Design-based estimation**: Horvitz-Thompson total with the local-mean

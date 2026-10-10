@@ -2,7 +2,8 @@
 //!
 //! Field-survey design under real field cost. The crate provides the
 //! computational pieces behind the R package `fieldopt`: travel matrices,
-//! GRASP routing of field work (with service times and route limits),
+//! routing of field work (exact for small instances, hybrid genetic search
+//! otherwise, with service times, stops and capacity limits),
 //! spatially balanced sampling with the local pivotal method, balanced
 //! sampling with the cube method and the Voronoi measure of spatial balance,
 //! Horvitz-Thompson estimation with the local-mean variance estimator, and
@@ -27,7 +28,7 @@
 //! let units: Vec<usize> = (0..36).filter(|&i| sampled[i]).map(|i| i + 1).collect();
 //!
 //! // route the field work from the depot with at most 5 segments per day
-//! let limits = RouteLimits { max_length: f64::INFINITY, max_stops: 5 };
+//! let limits = RouteLimits { max_length: f64::INFINITY, max_stops: 5, capacity: f64::INFINITY };
 //! let sol = grasp_routes(&m, 0, &units, limits, GraspOptions::default()).unwrap();
 //! assert_eq!(sol.routes.iter().map(|r| r.len()).sum::<usize>(), 12);
 //! assert!(sol.total >= sol.lower_bound);
@@ -46,6 +47,7 @@ pub mod routing;
 pub mod sampling;
 pub mod spatial;
 pub mod twostage;
+pub mod vrp;
 
 pub use allocation::{
     allocate_for_budget, allocate_for_variance, allocate_multivariate, Allocation, MultiAllocation,
