@@ -143,7 +143,7 @@ fn main() {
         };
         let options = GraspOptions {
             iterations,
-            time_limit: f64::INFINITY,
+            time_limit,
             alpha: 0.3,
             seed: 1,
         };
