@@ -10,6 +10,7 @@
 //!   embedding).
 
 use crate::rng::Rng;
+use crate::spatial_index::GridIndex;
 
 /// Inclusion probabilities proportional to `size`, summing to `n`, with
 /// probabilities above one capped at one and the remainder redistributed.
@@ -97,24 +98,63 @@ pub fn local_pivotal(coords: &[f64], d: usize, pi: &[f64], seed: u64) -> Result<
     let mut rng = Rng::new(seed);
     let undecided = |p: &[f64], i: usize| p[i] > 1e-12 && p[i] < 1.0 - 1e-12;
     let mut active: Vec<usize> = (0..n).filter(|&i| undecided(&p, i)).collect();
+    // position of each unit in `active`, for removals in constant time
+    let mut where_ = vec![usize::MAX; n];
+    for (k, &i) in active.iter().enumerate() {
+        where_[i] = k;
+    }
+    let mut index = if d == 2 {
+        Some(GridIndex::new(coords, &active))
+    } else {
+        None
+    };
+    let remove = |active: &mut Vec<usize>,
+                  where_: &mut Vec<usize>,
+                  index: &mut Option<GridIndex>,
+                  i: usize| {
+        let k = where_[i];
+        if k == usize::MAX {
+            return;
+        }
+        let last = *active.last().unwrap();
+        active.swap_remove(k);
+        if last != i {
+            where_[last] = k;
+        }
+        where_[i] = usize::MAX;
+        if let Some(ix) = index {
+            ix.remove(i);
+        }
+    };
     while active.len() > 1 {
         let ai = rng.below(active.len());
         let i = active[ai];
         // nearest undecided neighbour, random tie-break
-        let mut best = f64::INFINITY;
-        let mut ties: Vec<usize> = Vec::new();
-        for &j in &active {
-            if j == i {
-                continue;
+        let ties: Vec<usize> = if let Some(ix) = &index {
+            ix.nearest(coords[2 * i], coords[2 * i + 1], i)
+                .map(|(_, t)| t)
+                .unwrap_or_default()
+        } else {
+            let mut best = f64::INFINITY;
+            let mut ties: Vec<usize> = Vec::new();
+            for &j in &active {
+                if j == i {
+                    continue;
+                }
+                let dist = sq_dist(coords, d, i, j);
+                if dist < best - 1e-12 {
+                    best = dist;
+                    ties.clear();
+                    ties.push(j);
+                } else if (dist - best).abs() <= 1e-12 {
+                    ties.push(j);
+                }
             }
-            let dist = sq_dist(coords, d, i, j);
-            if dist < best - 1e-12 {
-                best = dist;
-                ties.clear();
-                ties.push(j);
-            } else if (dist - best).abs() <= 1e-12 {
-                ties.push(j);
-            }
+            ties.sort_unstable();
+            ties
+        };
+        if ties.is_empty() {
+            break;
         }
         let j = ties[rng.below(ties.len())];
         let (pi_i, pi_j) = (p[i], p[j]);
@@ -134,7 +174,11 @@ pub fn local_pivotal(coords: &[f64], d: usize, pi: &[f64], seed: u64) -> Result<
             p[i] = sum - 1.0;
             p[j] = 1.0;
         }
-        active.retain(|&k| undecided(&p, k));
+        for &k in &[i, j] {
+            if !undecided(&p, k) {
+                remove(&mut active, &mut where_, &mut index, k);
+            }
+        }
     }
     // a single undecided unit with probability p is included with probability p
     for i in 0..n {

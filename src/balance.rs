@@ -15,6 +15,7 @@
 //!   sample size) is kept longest.
 
 use crate::rng::Rng;
+use crate::spatial_index::GridIndex;
 
 /// Voronoi measure of spatial balance of a sample (see the module
 /// documentation). `coords` is `n x d` row-major.
@@ -39,17 +40,37 @@ pub fn spatial_balance(
         return Err("the sample is empty".into());
     }
     let mut v = vec![0.0; s.len()];
-    for k in 0..n {
-        let mut best = (f64::INFINITY, 0usize);
-        for (idx, &i) in s.iter().enumerate() {
-            let dist: f64 = (0..d)
-                .map(|c| (coords[k * d + c] - coords[i * d + c]).powi(2))
-                .sum();
-            if dist < best.0 {
-                best = (dist, idx);
-            }
+    let mut slot = vec![usize::MAX; n];
+    for (idx, &i) in s.iter().enumerate() {
+        slot[i] = idx;
+    }
+    if d == 2 {
+        let index = GridIndex::new(coords, &s);
+        for k in 0..n {
+            // nearest sampled unit (a sampled unit is its own nearest)
+            let target = if sampled[k] {
+                k
+            } else {
+                index
+                    .nearest(coords[2 * k], coords[2 * k + 1], usize::MAX)
+                    .map(|(_, t)| t[0])
+                    .unwrap()
+            };
+            v[slot[target]] += pi[k];
         }
-        v[best.1] += pi[k];
+    } else {
+        for k in 0..n {
+            let mut best = (f64::INFINITY, 0usize);
+            for (idx, &i) in s.iter().enumerate() {
+                let dist: f64 = (0..d)
+                    .map(|c| (coords[k * d + c] - coords[i * d + c]).powi(2))
+                    .sum();
+                if dist < best.0 {
+                    best = (dist, idx);
+                }
+            }
+            v[best.1] += pi[k];
+        }
     }
     Ok(v.iter().map(|x| (x - 1.0).powi(2)).sum::<f64>() / s.len() as f64)
 }

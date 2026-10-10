@@ -47,6 +47,7 @@ pub mod rng;
 pub mod routing;
 pub mod sampling;
 pub mod spatial;
+pub(crate) mod spatial_index;
 pub mod twostage;
 pub mod vrp;
 
