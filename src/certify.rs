@@ -258,6 +258,7 @@ fn order_tour(k: usize, edges: &[(usize, usize)]) -> Vec<usize> {
 /// matrix. `upper` is the cost of the best known tour and `tour` that tour
 /// (unit indices); `max_nodes` and `time_limit` (seconds) bound the search;
 /// `tolerance` is the relative gap at which a tour counts as optimal.
+#[allow(clippy::too_many_arguments)]
 pub fn certify_tour(
     m: &Matrix,
     depot: usize,
