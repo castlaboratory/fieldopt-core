@@ -84,6 +84,8 @@ impl Default for GraspOptions {
 pub struct Solution {
     /// The routes, each a sequence of unit indices (depot excluded).
     pub routes: Vec<Vec<usize>>,
+    /// The depot (node index) each route leaves from and returns to.
+    pub route_depots: Vec<usize>,
     /// Travel cost of each route, depot to depot.
     pub lengths: Vec<f64>,
     /// Duration of each route: travel plus the service time of its units
@@ -408,6 +410,27 @@ pub fn grasp_routes_with_service(
     solve_routes(m, depot, units, service, &[], limits, options)
 }
 
+/// Depots of a routing problem: node indices, the number of routes each may
+/// send (`usize::MAX` for no limit) and the cost of opening one route, in
+/// travel units (it enters the objective as `fixed_cost * routes`).
+#[derive(Clone, Debug)]
+pub struct Fleet {
+    pub depots: Vec<usize>,
+    pub routes_available: Vec<usize>,
+    pub fixed_cost: f64,
+}
+
+impl Fleet {
+    /// One depot, unlimited routes, no fixed cost.
+    pub fn single(depot: usize) -> Self {
+        Fleet {
+            depots: vec![depot],
+            routes_available: vec![usize::MAX],
+            fixed_cost: 0.0,
+        }
+    }
+}
+
 /// Solve the routing of `units` from `depot`: `service` is the time spent at
 /// each node and `demand` the load each node adds to its route (both per
 /// node of the matrix, empty for none); `max_length` limits the duration of
@@ -424,7 +447,55 @@ pub fn solve_routes(
     limits: RouteLimits,
     options: GraspOptions,
 ) -> Result<Solution, String> {
-    validate(m, depot, units)?;
+    solve_fleet(
+        m,
+        &Fleet::single(depot),
+        units,
+        service,
+        demand,
+        limits,
+        options,
+    )
+}
+
+/// As [`solve_routes`], with several depots: every route leaves from and
+/// returns to one depot, chosen by the solver; each depot sends at most its
+/// number of routes available; the objective is the total travel plus the
+/// fixed cost of the routes opened. Instances of up to
+/// [`EXACT_MAX_UNITS`] units are solved exactly when no depot's route limit
+/// can bind.
+pub fn solve_fleet(
+    m: &Matrix,
+    fleet: &Fleet,
+    units: &[usize],
+    service: &[f64],
+    demand: &[f64],
+    limits: RouteLimits,
+    options: GraspOptions,
+) -> Result<Solution, String> {
+    if fleet.depots.is_empty() || fleet.depots.len() != fleet.routes_available.len() {
+        return Err(
+            "the fleet needs at least one depot, with a number of routes available for each".into(),
+        );
+    }
+    if !fleet.fixed_cost.is_finite() || fleet.fixed_cost < 0.0 {
+        return Err("the fixed cost per route must be finite and non-negative".into());
+    }
+    for &d in &fleet.depots {
+        validate(m, d, units)?;
+    }
+    {
+        let mut seen = vec![false; m.len()];
+        for &d in &fleet.depots {
+            if seen[d] {
+                return Err("depots must be distinct".into());
+            }
+            seen[d] = true;
+        }
+    }
+    if fleet.routes_available.contains(&0) {
+        return Err("every depot needs at least one route available".into());
+    }
     if !(0.0..=1.0).contains(&options.alpha) {
         return Err("alpha must be in [0, 1]".into());
     }
@@ -459,27 +530,48 @@ pub fn solve_routes(
     let service = check(service, "service times")?;
     let demand = check(demand, "demands")?;
     let symmetric = is_symmetric(m);
-    let inst = Instance::new(
+    let inst = Instance::with_depots(
         m,
-        depot,
+        &fleet.depots,
+        &fleet.routes_available,
+        fleet.fixed_cost,
         units,
         service.clone(),
         demand.clone(),
         limits,
         symmetric,
     );
+    // every unit must be servable alone from some depot
     for &u in units {
-        if !inst.feasible(&[u]) {
+        let ok = fleet.depots.iter().any(|&d| {
+            let travel = m.get(d, u) + m.get(u, d);
+            travel + service[u] <= limits.max_length + 1e-9 && demand[u] <= limits.capacity + 1e-9
+        });
+        if !ok {
             return Err("some unit cannot be served within the route limits".into());
         }
     }
+    let total_routes_available: f64 = fleet
+        .routes_available
+        .iter()
+        .map(|&k| {
+            if k == usize::MAX {
+                f64::INFINITY
+            } else {
+                k as f64
+            }
+        })
+        .sum();
+    let fleet_binds = total_routes_available.is_finite();
     let mut rng = Rng::new(options.seed);
-    let (routes, total, best_iteration, optimal) = if units.len() <= EXACT_MAX_UNITS {
-        let (r, c) = vrp::exact(&inst, units)
+    let (routes, depot_idx, objective, best_iteration, optimal) = if units.len() <= EXACT_MAX_UNITS
+        && !fleet_binds
+    {
+        let (r, d, c) = vrp::exact(&inst, units)
             .ok_or_else(|| "some unit cannot be served within the route limits".to_string())?;
-        (r, c, 0, true)
+        (r, d, c, 0, true)
     } else {
-        let (r, c, it) = vrp::hgs(
+        let (r, d, c, it) = vrp::hgs(
             &inst,
             units,
             options.iterations,
@@ -487,25 +579,41 @@ pub fn solve_routes(
             options.time_limit,
             &mut rng,
         )
-        .ok_or_else(|| "some unit cannot be served within the route limits".to_string())?;
-        (r, c, it, false)
+        .ok_or_else(|| {
+            "no solution respects the route limits and the routes available per depot".to_string()
+        })?;
+        (r, d, c, it, false)
     };
+    let route_depots: Vec<usize> = depot_idx.iter().map(|&k| fleet.depots[k]).collect();
+    let lengths: Vec<f64> = routes
+        .iter()
+        .zip(&route_depots)
+        .map(|(r, &d)| route_length(m, d, r))
+        .collect();
+    let total: f64 = lengths.iter().sum();
     let (lower_bound, proven) = if optimal {
         (total, true)
-    } else {
+    } else if fleet.depots.len() == 1 {
         lower_bound(&inst, units, total)
+    } else {
+        (
+            in_out_bound_multi(m, &fleet.depots, units).min(total),
+            false,
+        )
     };
-    let lengths: Vec<f64> = routes.iter().map(|r| route_length(m, depot, r)).collect();
     let durations: Vec<f64> = routes
         .iter()
-        .map(|r| route_duration(m, depot, r, &service))
+        .zip(&route_depots)
+        .map(|(r, &d)| route_duration(m, d, r, &service))
         .collect();
     let loads: Vec<f64> = routes
         .iter()
         .map(|r| r.iter().map(|&u| demand[u]).sum())
         .collect();
+    let _ = objective;
     Ok(Solution {
         routes,
+        route_depots,
         lengths,
         durations,
         loads,
@@ -514,6 +622,24 @@ pub fn solve_routes(
         optimal: optimal || proven,
         best_iteration,
     })
+}
+
+/// Half the sum over the units of the cheapest incoming and outgoing edge
+/// (from units or depots): a bound on the travel of any multi-depot solution.
+fn in_out_bound_multi(m: &Matrix, depots: &[usize], units: &[usize]) -> f64 {
+    let nodes: Vec<usize> = depots.iter().chain(units.iter()).copied().collect();
+    let mut sum = 0.0;
+    for &i in units {
+        let (mut min_out, mut min_in) = (f64::INFINITY, f64::INFINITY);
+        for &j in &nodes {
+            if i != j {
+                min_out = min_out.min(m.get(i, j));
+                min_in = min_in.min(m.get(j, i));
+            }
+        }
+        sum += min_out + min_in;
+    }
+    sum / 2.0
 }
 
 #[cfg(test)]

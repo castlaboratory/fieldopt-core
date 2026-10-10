@@ -10,7 +10,9 @@ Field-survey design under real field cost, in pure Rust with no dependencies:
   penalties, the optimal split of Prins (2004), and a granular local search
   (2-opt, Or-opt, relocate, swap, SWAP*, 2-opt*) priced from route totals in
   constant time, under limits on route duration (travel plus service time),
-  stops and capacity, on symmetric or asymmetric matrices. Optimal on the
+  stops and capacity, with one or several depots (each with its own number
+  of routes available) and a fixed cost per route, on symmetric or
+  asymmetric matrices. Optimal on the
   seven classical TSPLIB instances up to 101 nodes and on 24 of the 27
   Augerat set A CVRP instances (mean gap 0.01%, largest 0.15%) in about two
   seconds each; the Held-Karp bound certifies single tours; stops on
