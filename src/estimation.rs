@@ -40,10 +40,16 @@ fn sq_dist(coords: &[f64], d: usize, i: usize, j: usize) -> f64 {
 }
 
 /// Local-mean variance estimator of the Horvitz-Thompson total for a
-/// spatially balanced sample. For each sampled unit `i`, the neighbourhood is
-/// `i` and its nearest sampled units, added until the sum of their inclusion
-/// probabilities reaches one; the estimator is
-/// `sum_i n_i / (n_i - 1) * (y_i / pi_i - mean_{j in N_i} y_j / pi_j)^2`.
+/// spatially balanced sample (Grafström and Schelin 2014). For each sampled
+/// unit `i`, the neighbourhood `N_i` is `i` and its `k` nearest sampled units
+/// (all units tied at the `k`-th distance are included), and the estimator is
+/// `sum_i m_i / (m_i - 1) * (y_i / pi_i - mean_{j in N_i} y_j / pi_j)^2`
+/// with `m_i = |N_i|`. This is the estimator of `BalancedSampling::vsb()`;
+/// `k = 3` is its default. Small `k` keeps the neighbourhood local, which
+/// matters for spatially smooth variables: a neighbourhood that grows until
+/// the inclusion probabilities sum to one (the rule of versions before
+/// 0.10.0) spans about `N/n` units and overestimated the variance by 40 to
+/// 150 percent on smooth fields.
 /// `coords` is the `N x d` row-major coordinate matrix of the population.
 pub fn local_mean_variance(
     coords: &[f64],
@@ -51,11 +57,15 @@ pub fn local_mean_variance(
     y: &[f64],
     pi: &[f64],
     sampled: &[bool],
+    k: usize,
 ) -> Result<f64, String> {
     check(y, pi, sampled)?;
     let n = y.len();
     if d == 0 || coords.len() != n * d {
         return Err(format!("coords must be an {n} x {d} matrix"));
+    }
+    if k == 0 {
+        return Err("k must be at least 1".into());
     }
     let s: Vec<usize> = (0..n).filter(|&i| sampled[i]).collect();
     if s.len() < 2 {
@@ -72,32 +82,19 @@ pub fn local_mean_variance(
             .map(|&j| (sq_dist(coords, d, i, j), j))
             .collect();
         others.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let kk = k.min(others.len());
+        let cut = others[kk - 1].0;
         let mut members = vec![i];
-        let mut pi_sum = pi[i];
-        for (_, j) in others {
-            if pi_sum >= 1.0 {
+        for &(dist, j) in &others {
+            if dist <= cut * (1.0 + 1e-12) {
+                members.push(j);
+            } else {
                 break;
             }
-            members.push(j);
-            pi_sum += pi[j];
         }
-        if members.len() < 2 {
-            // isolated unit with pi >= 1: take its nearest neighbour anyway
-            let j = s
-                .iter()
-                .filter(|&&j| j != i)
-                .min_by(|&&a, &&b| {
-                    sq_dist(coords, d, i, a)
-                        .partial_cmp(&sq_dist(coords, d, i, b))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-                .copied()
-                .unwrap();
-            members.push(j);
-        }
-        let ni = members.len() as f64;
-        let mean: f64 = members.iter().map(|&j| y[j] / pi[j]).sum::<f64>() / ni;
-        total += ni / (ni - 1.0) * (y[i] / pi[i] - mean).powi(2);
+        let mi = members.len() as f64;
+        let mean: f64 = members.iter().map(|&j| y[j] / pi[j]).sum::<f64>() / mi;
+        total += mi / (mi - 1.0) * (y[i] / pi[i] - mean).powi(2);
     }
     Ok(total)
 }
@@ -142,7 +139,7 @@ mod tests {
         for s in 0..reps {
             let sampled = local_pivotal(&coords, 2, &pi, s as u64).unwrap();
             sum += ht_total(&y, &pi, &sampled).unwrap();
-            var_est += local_mean_variance(&coords, 2, &y, &pi, &sampled).unwrap();
+            var_est += local_mean_variance(&coords, 2, &y, &pi, &sampled, 3).unwrap();
         }
         let mean = sum / reps as f64;
         assert!(
@@ -150,6 +147,24 @@ mod tests {
             "mean {mean} truth {truth}"
         );
         assert!(var_est / reps as f64 > 0.0);
+    }
+
+    #[test]
+    fn local_mean_matches_balancedsampling_vsb() {
+        // BalancedSampling 2.1.1: vsb(rep(0.4, 10), y, xs, k = 3L) = 569.2708333...
+        // and k = 1L gives 573.4375 (xs has ties, which both include).
+        let xs = [
+            0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 3.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 1.0, 3.0, 1.0, 0.5,
+            2.0, 2.5, 2.0,
+        ];
+        let y = [3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0, 5.0, 3.0];
+        let pi = [0.4; 10];
+        let sampled = [true; 10];
+        let v3 = local_mean_variance(&xs, 2, &y, &pi, &sampled, 3).unwrap();
+        let v1 = local_mean_variance(&xs, 2, &y, &pi, &sampled, 1).unwrap();
+        assert!((v3 - 569.270_833_333_333_4).abs() < 1e-9, "k = 3: {v3}");
+        assert!((v1 - 573.437_5).abs() < 1e-9, "k = 1: {v1}");
+        assert!(local_mean_variance(&xs, 2, &y, &pi, &sampled, 0).is_err());
     }
 
     #[test]

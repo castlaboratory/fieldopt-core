@@ -26,8 +26,9 @@ Field-survey design under real field cost, in pure Rust with no dependencies:
   under a second) with the local pivotal method (Grafström,
   Lundström and Schelin 2012) and size-proportional inclusion probabilities.
 - **Design-based estimation**: Horvitz-Thompson total with the local-mean
-  variance estimator (Grafström and Schelin 2014) and the simple-random-sampling
-  variance as a reference.
+  variance estimator (Grafström and Schelin 2014) over each unit and its `k`
+  nearest sampled units (identical to `BalancedSampling::vsb()`), and the
+  simple-random-sampling variance as a reference.
 - **Cost-aware allocation** across strata or frames: minimum cost for a target
   variance, or minimum variance for a budget (Cochran 1977).
 
