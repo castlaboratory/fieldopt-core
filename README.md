@@ -15,8 +15,11 @@ Field-survey design under real field cost, in pure Rust with no dependencies:
   asymmetric matrices. Optimal on the
   seven classical TSPLIB instances up to 101 nodes and on 24 of the 27
   Augerat set A CVRP instances (mean gap 0.01%, largest 0.15%) in about two
-  seconds each; the Held-Karp bound certifies single tours; stops on
-  offspring or on time.
+  seconds each; on Cordeau's 23 multi-depot instances (50 to 360 customers,
+  with route duration limits) at or below the best known solution on 13,
+  mean gap 0.20%, largest 1.6%, in 1 to 100 seconds; results vary by less
+  than one percent across seeds. The Held-Karp bound certifies single
+  tours; stops on offspring or on time.
 - **Spatially balanced sampling** with the local pivotal method (Grafström,
   Lundström and Schelin 2012) and size-proportional inclusion probabilities.
 - **Design-based estimation**: Horvitz-Thompson total with the local-mean

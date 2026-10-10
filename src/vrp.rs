@@ -13,7 +13,9 @@
 
 use crate::distance::Matrix;
 use crate::rng::Rng;
-use crate::routing::{construct, or_opt, route_length, two_opt, RouteLimits};
+#[cfg(test)]
+use crate::routing::route_length;
+use crate::routing::{construct, or_opt, two_opt, RouteLimits};
 
 /// Largest number of units solved exactly by dynamic programming.
 pub const EXACT_MAX_UNITS: usize = 13;
@@ -109,7 +111,8 @@ impl<'a> Instance<'a> {
         self.m.get(i, j)
     }
 
-    /// Travel, duration and load of a route.
+    /// Travel, duration and load of a route from the first depot.
+    #[cfg(test)]
     pub fn evaluate(&self, route: &[usize]) -> (f64, f64, f64) {
         let travel = route_length(self.m, self.depot, route);
         let served: f64 = route.iter().map(|&u| self.service[u]).sum();
@@ -117,6 +120,8 @@ impl<'a> Instance<'a> {
         (travel, travel + served, load)
     }
 
+    /// Whether a route from the first depot is within the limits.
+    #[cfg(test)]
     pub fn feasible(&self, route: &[usize]) -> bool {
         if route.len() > self.limits.max_stops {
             return false;
@@ -310,10 +315,16 @@ impl Sol {
         routes + fleet
     }
 
+    /// Every route within the limits from its own depot, and every depot
+    /// within its number of routes available.
     fn feasible(&self, inst: &Instance) -> bool {
-        self.routes.iter().all(|r| inst.feasible(r))
-            && (0..inst.depots.len())
-                .all(|k| inst.fleet[k] == usize::MAX || self.count[k] <= inst.fleet[k])
+        let l = &inst.limits;
+        self.routes.iter().zip(&self.infos).all(|(r, i)| {
+            r.len() <= l.max_stops
+                && i.travel + i.service <= l.max_length + 1e-9
+                && i.load <= l.capacity + 1e-9
+        }) && (0..inst.depots.len())
+            .all(|k| inst.fleet[k] == usize::MAX || self.count[k] <= inst.fleet[k])
     }
 
     fn refresh(&mut self, inst: &Instance, k: usize) {
@@ -347,12 +358,33 @@ impl Sol {
 
 /// Optimal split of a giant tour into routes (Prins 2004) under the
 /// penalised cost, each route leaving from its cheapest depot: routes may
-/// exceed the limits by up to half, at the penalty's price. `None` when no
-/// unit can start a route.
+/// exceed the limits by up to half, at the penalty's price. When the depots
+/// together may send a finite number of routes, the split uses at most that
+/// many (the limited-fleet split of Prins 2009: states are position and
+/// routes used). `None` when no unit can start a route.
 fn split_penalised(
     inst: &Instance,
     tour: &[usize],
     pen: &Penalties,
+) -> Option<(Vec<Vec<usize>>, Vec<usize>)> {
+    let total_fleet: usize = inst
+        .fleet
+        .iter()
+        .fold(0usize, |acc, &k| acc.saturating_add(k));
+    if total_fleet < tour.len() {
+        // try within the fleet first; a giant tour that cannot be cut into so few routes is split freely
+        if let Some(r) = split_capped(inst, tour, pen, total_fleet) {
+            return Some(r);
+        }
+    }
+    split_capped(inst, tour, pen, tour.len())
+}
+
+fn split_capped(
+    inst: &Instance,
+    tour: &[usize],
+    pen: &Penalties,
+    cap: usize,
 ) -> Option<(Vec<Vec<usize>>, Vec<usize>)> {
     let n = tour.len();
     let l = &inst.limits;
@@ -369,54 +401,72 @@ fn split_penalised(
     let max_stops = if l.max_stops == usize::MAX {
         usize::MAX
     } else {
-        (3 * l.max_stops + 1) / 2
+        l.max_stops
+            .saturating_add(l.max_stops.saturating_add(1) / 2)
     };
-    let mut cost = vec![f64::INFINITY; n + 1];
-    let mut pred = vec![usize::MAX; n + 1];
-    let mut dep = vec![0usize; n + 1];
-    cost[0] = 0.0;
-    for i in 0..n {
-        if !cost[i].is_finite() {
-            continue;
-        }
-        let (mut inner, mut served, mut load) = (0.0, 0.0, 0.0);
-        for j in i..n {
-            let stops = j - i + 1;
-            if stops > max_stops {
-                break;
+    let cap = cap.min(n).max(1);
+    // cost[k][j]: cheapest way to serve the first j units with k routes
+    let inf = f64::INFINITY;
+    let mut cost = vec![vec![inf; n + 1]; cap + 1];
+    let mut pred = vec![vec![usize::MAX; n + 1]; cap + 1];
+    let mut dep = vec![vec![0usize; n + 1]; cap + 1];
+    cost[0][0] = 0.0;
+    for k in 0..cap {
+        for i in 0..n {
+            if !cost[k][i].is_finite() {
+                continue;
             }
-            if j > i {
-                inner += inst.c(tour[j - 1], tour[j]);
-            }
-            served += inst.service[tour[j]];
-            load += inst.demand[tour[j]];
-            if load > max_load + 1e-9 {
-                break;
-            }
-            let (k, ends) = inst.best_depot(tour[i], tour[j]);
-            let travel = inner + ends;
-            if travel + served > max_dur + 1e-9 {
-                break;
-            }
-            let route_cost = inst.route_cost(travel, load, served, stops, pen);
-            if cost[i] + route_cost < cost[j + 1] {
-                cost[j + 1] = cost[i] + route_cost;
-                pred[j + 1] = i;
-                dep[j + 1] = k;
+            let (mut inner, mut served, mut load) = (0.0, 0.0, 0.0);
+            let first_leg = inst
+                .depots
+                .iter()
+                .map(|&d| inst.c(d, tour[i]))
+                .fold(f64::INFINITY, f64::min);
+            for j in i..n {
+                let stops = j - i + 1;
+                if stops > max_stops {
+                    break;
+                }
+                if j > i {
+                    inner += inst.c(tour[j - 1], tour[j]);
+                }
+                served += inst.service[tour[j]];
+                load += inst.demand[tour[j]];
+                if load > max_load + 1e-9 {
+                    break;
+                }
+                let (kd, ends) = inst.best_depot(tour[i], tour[j]);
+                let travel = inner + ends;
+                if travel + served > max_dur + 1e-9 {
+                    // the return leg is not monotone in j without the triangle inequality:
+                    // stop only when the monotone part already exceeds the window
+                    if inner + served + first_leg > max_dur + 1e-9 {
+                        break;
+                    }
+                    continue;
+                }
+                let route_cost = inst.route_cost(travel, load, served, stops, pen);
+                let v = cost[k][i] + route_cost;
+                if v < cost[k + 1][j + 1] {
+                    cost[k + 1][j + 1] = v;
+                    pred[k + 1][j + 1] = i;
+                    dep[k + 1][j + 1] = kd;
+                }
             }
         }
     }
-    if !cost[n].is_finite() {
-        return None;
-    }
+    let best_k = (1..=cap)
+        .filter(|&k| cost[k][n].is_finite())
+        .min_by(|&a, &b| cost[a][n].partial_cmp(&cost[b][n]).unwrap())?;
     let mut routes = Vec::new();
     let mut depots = Vec::new();
-    let mut j = n;
+    let (mut k, mut j) = (best_k, n);
     while j > 0 {
-        let i = pred[j];
+        let i = pred[k][j];
         routes.push(tour[i..j].to_vec());
-        depots.push(dep[j]);
+        depots.push(dep[k][j]);
         j = i;
+        k -= 1;
     }
     routes.reverse();
     depots.reverse();
@@ -509,8 +559,8 @@ fn local_search_pen(inst: &Instance, sol: &mut Sol, pen: &Penalties, rng: &mut R
                     let new =
                         inst.route_cost(travel, ia.load, ia.service, sol.routes[a].len(), pen)
                             + inst.fleet_cost(k, sol.count[k] + 1, pen)
-                            + inst.fleet_cost(ka, sol.count[ka] - 1, pen)
-                            - inst.fleet_cost(ka, sol.count[ka], pen);
+                            - inst.fleet_cost(k, sol.count[k], pen)
+                            + inst.fleet_cost(ka, sol.count[ka] - 1, pen);
                     if new < cur - 1e-9 && best.map_or(true, |b| new < b.1) {
                         best = Some((k, new));
                     }
@@ -565,11 +615,18 @@ fn local_search_pen(inst: &Instance, sol: &mut Sol, pen: &Penalties, rng: &mut R
                         - inst.fleet_cost(ka, sol.count[ka], pen),
                 )
             };
-            // relocate u into a route of its own from its cheapest depot
+            // relocate u into a route of its own, from the depot where that costs least (fleet included)
             if ra.len() > 1 {
-                let (k, ends) = inst.best_depot(u, u);
-                let alone = cost_of(ends, du, su, 1) + inst.fleet_cost(k, sol.count[k] + 1, pen)
-                    - inst.fleet_cost(k, sol.count[k], pen);
+                let mut best_new: Option<(usize, f64)> = None;
+                for (k, &d) in inst.depots.iter().enumerate() {
+                    let alone = cost_of(inst.c(d, u) + inst.c(u, d), du, su, 1)
+                        + inst.fleet_cost(k, sol.count[k] + 1, pen)
+                        - inst.fleet_cost(k, sol.count[k], pen);
+                    if best_new.map_or(true, |b| alone < b.1) {
+                        best_new = Some((k, alone));
+                    }
+                }
+                let (k, alone) = best_new.unwrap();
                 if cost_a_without + alone < cost_a - 1e-9 {
                     sol.routes[a].remove(i);
                     sol.routes.push(vec![u]);
@@ -1093,9 +1150,14 @@ pub(crate) fn hgs(
             hist_stops.push(!v_stops);
             hist_fleet.push(!v_fleet);
             let feasible = !(v_load || v_dur || v_stops || v_fleet);
-            if !feasible && rng.next_f64() < 0.5 {
+            // repair attempt with a tenfold penalty: half of the time, or always
+            // (and then a hundredfold) while no feasible solution is known
+            if !feasible && (feas.is_empty() || rng.next_f64() < 0.5) {
                 let mut repaired = sol.clone();
                 local_search_pen(inst, &mut repaired, &pen.scaled(10.0), rng);
+                if !repaired.feasible(inst) && feas.is_empty() {
+                    local_search_pen(inst, &mut repaired, &pen.scaled(100.0), rng);
+                }
                 if repaired.feasible(inst) {
                     sol = repaired;
                 }
@@ -1115,15 +1177,53 @@ pub(crate) fn hgs(
         if infeas.len() >= mu + lambda {
             survivors(&mut infeas, mu, n, depot0, nb_elite, nb_close);
         }
+        if it % 100 == 0 && std::env::var("FIELDOPT_DEBUG").is_ok() {
+            let worst = infeas.iter().min_by(|a, b| {
+                a.cost
+                    .partial_cmp(&b.cost)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            if let Some(w) = worst {
+                let sol = Sol::new(inst, w.routes.clone(), w.depot_of.clone());
+                let l = &inst.limits;
+                let max_dur = sol
+                    .infos
+                    .iter()
+                    .map(|i| i.travel + i.service - l.max_length)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let max_load = sol
+                    .infos
+                    .iter()
+                    .map(|i| i.load - l.capacity)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                eprintln!(
+                    "it {it}: feas {} infeas {} best {:?} pen {:?} | best infeasible: routes {} per depot {:?} fleet {:?} max dur excess {:.1} max load excess {:.1} travel {:.1}",
+                    feas.len(),
+                    infeas.len(),
+                    best.as_ref().map(|b| b.2),
+                    (pen.load, pen.duration, pen.stops, pen.fleet),
+                    sol.routes.len(),
+                    sol.count,
+                    inst.fleet,
+                    max_dur,
+                    max_load,
+                    sol.travel()
+                );
+            }
+        }
         if it % 100 == 0 {
+            // while nothing feasible is known, every binding penalty doubles
+            let none_feasible = feas.is_empty();
             let adjust = |hist: &mut Vec<bool>, p: &mut f64| {
                 if hist.is_empty() {
                     return;
                 }
                 let frac = hist.iter().filter(|&&f| f).count() as f64 / hist.len() as f64;
-                if frac < target_feasible - 0.05 {
+                if none_feasible && frac < 1.0 {
+                    *p = (*p * 2.0).min(1e6);
+                } else if frac < target_feasible - 0.05 {
                     *p = (*p * 1.2).min(1e6);
-                } else if frac > target_feasible + 0.05 {
+                } else if frac > target_feasible + 0.05 && !none_feasible {
                     *p = (*p * 0.85).max(1e-3);
                 }
                 hist.clear();
@@ -1267,7 +1367,8 @@ pub(crate) fn exact(
 /// Held-Karp 1-tree lower bound on a single tour through the depot and the
 /// units of a symmetric matrix (subgradient ascent, Held and Karp 1971).
 /// Returns the bound and whether the final 1-tree is itself a tour (then
-/// the bound is the optimum).
+/// the bound is the optimum of the tour problem, which proves a solution
+/// optimal only when its cost meets the bound).
 pub(crate) fn held_karp_bound(
     m: &Matrix,
     depot: usize,
@@ -1517,6 +1618,298 @@ mod tests {
         let mut all: Vec<usize> = routes.concat();
         all.sort();
         assert_eq!(all, units);
+    }
+
+    fn rand_matrix(n: usize, rng: &mut Rng, asym: bool) -> Matrix {
+        let x: Vec<f64> = (0..n).map(|_| rng.next_f64() * 100.0).collect();
+        let y: Vec<f64> = (0..n).map(|_| rng.next_f64() * 100.0).collect();
+        let base = euclidean_matrix(&x, &y).unwrap();
+        let mut data = base.as_slice().to_vec();
+        if asym {
+            for i in 0..n {
+                for j in 0..n {
+                    if i != j {
+                        data[i * n + j] *= 0.5 + rng.next_f64();
+                    }
+                }
+            }
+        }
+        Matrix::from_vec(n, data).unwrap()
+    }
+
+    fn route_cost_with(inst: &Instance, r: &[usize], d: usize, pen: &Penalties) -> f64 {
+        let t = route_length(inst.m, d, r);
+        let l: f64 = r.iter().map(|&u| inst.demand[u]).sum();
+        let s: f64 = r.iter().map(|&u| inst.service[u]).sum();
+        inst.route_cost(t, l, s, r.len(), pen)
+    }
+
+    #[test]
+    fn depot_change_never_worsens_the_penalised_cost() {
+        // depot 0 at the origin with one route allowed, depot 1 far away; three
+        // single-unit routes at depot 0: moving one costs 56 of travel, the
+        // fleet penalty saves 25, so nothing should move (regression of a
+        // mispriced fleet term that oscillated until the guard)
+        let x = [0.0, 30.0, 1.0, 2.0, 3.0];
+        let y = [0.0, 0.0, 0.0, 10.0, 20.0];
+        let m = euclidean_matrix(&x, &y).unwrap();
+        let units = vec![2, 3, 4];
+        let limits = RouteLimits {
+            max_length: f64::INFINITY,
+            max_stops: 1,
+            capacity: f64::INFINITY,
+        };
+        let inst = Instance::with_depots(
+            &m,
+            &[0, 1],
+            &[1, usize::MAX],
+            0.0,
+            &units,
+            vec![0.0; 5],
+            vec![0.0; 5],
+            limits,
+            true,
+        );
+        let pen = Penalties {
+            load: 1.0,
+            duration: 1.0,
+            stops: 1e6,
+            fleet: 25.0,
+        };
+        let mut sol = Sol::new(&inst, vec![vec![2], vec![3], vec![4]], vec![0, 0, 0]);
+        let before = sol.cost(&inst, &pen);
+        let start = std::time::Instant::now();
+        let mut rng = Rng::new(1);
+        local_search_pen(&inst, &mut sol, &pen, &mut rng);
+        assert!(sol.cost(&inst, &pen) <= before + 1e-9);
+        assert!(
+            start.elapsed().as_secs_f64() < 0.5,
+            "local search did not settle"
+        );
+        // with a fleet penalty above the extra travel the route does move
+        let pen2 = Penalties { fleet: 60.0, ..pen };
+        let mut sol2 = Sol::new(&inst, vec![vec![2], vec![3], vec![4]], vec![0, 0, 0]);
+        local_search_pen(&inst, &mut sol2, &pen2, &mut rng);
+        assert!(
+            sol2.count[0] <= 1
+                || sol2.cost(&inst, &pen2)
+                    < Sol::new(&inst, vec![vec![2], vec![3], vec![4]], vec![0, 0, 0])
+                        .cost(&inst, &pen2)
+        );
+    }
+
+    #[test]
+    fn capped_split_matches_brute_force() {
+        for seed in 0..200u64 {
+            let mut rng = Rng::new(1000 + seed);
+            let nd = 1 + (seed % 3) as usize;
+            let nu = 3 + rng.below(6);
+            let n = nd + nu;
+            let asym = seed % 2 == 0;
+            let m = rand_matrix(n, &mut rng, asym);
+            let depots: Vec<usize> = (0..nd).collect();
+            let units: Vec<usize> = (nd..n).collect();
+            let fixed = rng.next_f64() * 50.0;
+            let service: Vec<f64> = (0..n).map(|_| rng.next_f64() * 20.0).collect();
+            let demand: Vec<f64> = (0..n).map(|_| 1.0 + rng.below(4) as f64).collect();
+            let limits = RouteLimits {
+                max_length: if rng.next_f64() < 0.7 {
+                    120.0 + rng.next_f64() * 200.0
+                } else {
+                    f64::INFINITY
+                },
+                max_stops: if rng.next_f64() < 0.7 {
+                    1 + rng.below(4)
+                } else {
+                    usize::MAX
+                },
+                capacity: if rng.next_f64() < 0.7 {
+                    3.0 + rng.below(8) as f64
+                } else {
+                    f64::INFINITY
+                },
+            };
+            let inst = Instance::with_depots(
+                &m,
+                &depots,
+                &vec![usize::MAX; nd],
+                fixed,
+                &units,
+                service,
+                demand,
+                limits,
+                !asym,
+            );
+            let pen = Penalties {
+                load: 10f64.powf(rng.next_f64() * 2.0 - 1.0),
+                duration: 10f64.powf(rng.next_f64() * 2.0 - 1.0),
+                stops: 10f64.powf(rng.next_f64() * 2.0),
+                fleet: 1.0,
+            };
+            let cap = 1 + rng.below(nu);
+            let mut tour = units.clone();
+            rng.shuffle(&mut tour);
+            let max_load = if limits.capacity.is_finite() {
+                1.5 * limits.capacity
+            } else {
+                f64::INFINITY
+            };
+            let max_dur = if limits.max_length.is_finite() {
+                1.5 * limits.max_length
+            } else {
+                f64::INFINITY
+            };
+            let max_stops = if limits.max_stops == usize::MAX {
+                usize::MAX
+            } else {
+                (3 * limits.max_stops + 1) / 2
+            };
+            let seg_cost = |i: usize, j: usize| -> f64 {
+                let r = &tour[i..j];
+                if r.len() > max_stops {
+                    return f64::INFINITY;
+                }
+                let (kd, _) = inst.best_depot(r[0], r[r.len() - 1]);
+                let d = inst.depots[kd];
+                let t = route_length(&m, d, r);
+                let l: f64 = r.iter().map(|&u| inst.demand[u]).sum();
+                let s: f64 = r.iter().map(|&u| inst.service[u]).sum();
+                if l > max_load + 1e-9 || t + s > max_dur + 1e-9 {
+                    return f64::INFINITY;
+                }
+                inst.route_cost(t, l, s, r.len(), &pen)
+            };
+            let mut best = f64::INFINITY;
+            for mask in 0..(1usize << (nu - 1)) {
+                if mask.count_ones() as usize + 1 > cap {
+                    continue;
+                }
+                let mut c = 0.0;
+                let mut start = 0;
+                for p in 0..nu - 1 {
+                    if mask & (1 << p) != 0 {
+                        c += seg_cost(start, p + 1);
+                        start = p + 1;
+                    }
+                }
+                c += seg_cost(start, nu);
+                best = best.min(c);
+            }
+            match split_capped(&inst, &tour, &pen, cap) {
+                None => assert!(
+                    !best.is_finite(),
+                    "seed {seed}: split None but brute force {best}"
+                ),
+                Some((routes, deps)) => {
+                    assert!(routes.len() <= cap);
+                    let c: f64 = routes
+                        .iter()
+                        .zip(&deps)
+                        .map(|(r, &k)| route_cost_with(&inst, r, inst.depots[k], &pen))
+                        .sum();
+                    assert!(
+                        (c - best).abs() < 1e-6,
+                        "seed {seed}: split {c} vs brute {best}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exact_matches_brute_force_with_several_depots_and_asymmetric_costs() {
+        fn perms(items: &[usize]) -> Vec<Vec<usize>> {
+            if items.len() <= 1 {
+                return vec![items.to_vec()];
+            }
+            let mut out = Vec::new();
+            for (k, &x) in items.iter().enumerate() {
+                let mut rest = items.to_vec();
+                rest.remove(k);
+                for mut p in perms(&rest) {
+                    p.insert(0, x);
+                    out.push(p);
+                }
+            }
+            out
+        }
+        for seed in 0..25u64 {
+            let mut rng = Rng::new(5000 + seed);
+            let nd = 1 + (seed % 3) as usize;
+            let nu = 6;
+            let n = nd + nu;
+            let m = rand_matrix(n, &mut rng, true);
+            let depots: Vec<usize> = (0..nd).collect();
+            let units: Vec<usize> = (nd..n).collect();
+            let fixed = rng.next_f64() * 60.0;
+            let service: Vec<f64> = (0..n).map(|_| rng.next_f64() * 20.0).collect();
+            let demand: Vec<f64> = (0..n).map(|_| 1.0 + rng.below(3) as f64).collect();
+            let limits = RouteLimits {
+                max_length: 150.0 + rng.next_f64() * 250.0,
+                max_stops: 2 + rng.below(3),
+                capacity: 3.0 + rng.below(5) as f64,
+            };
+            let inst = Instance::with_depots(
+                &m,
+                &depots,
+                &vec![usize::MAX; nd],
+                fixed,
+                &units,
+                service.clone(),
+                demand.clone(),
+                limits,
+                false,
+            );
+            let feas_cost = |r: &[usize]| -> f64 {
+                if r.len() > limits.max_stops {
+                    return f64::INFINITY;
+                }
+                let mut best = f64::INFINITY;
+                for &d in &depots {
+                    let t = route_length(&m, d, r);
+                    let s: f64 = r.iter().map(|&u| service[u]).sum();
+                    let l: f64 = r.iter().map(|&u| demand[u]).sum();
+                    if l <= limits.capacity + 1e-9 && t + s <= limits.max_length + 1e-9 && t < best
+                    {
+                        best = t;
+                    }
+                }
+                best + fixed
+            };
+            let mut brute = f64::INFINITY;
+            for p in perms(&units) {
+                for mask in 0..(1usize << (nu - 1)) {
+                    let mut c = 0.0;
+                    let mut start = 0;
+                    for q in 0..nu - 1 {
+                        if mask & (1 << q) != 0 {
+                            c += feas_cost(&p[start..q + 1]);
+                            start = q + 1;
+                        }
+                    }
+                    c += feas_cost(&p[start..]);
+                    brute = brute.min(c);
+                }
+            }
+            match exact(&inst, &units) {
+                None => assert!(
+                    !brute.is_finite(),
+                    "seed {seed}: exact None but brute {brute}"
+                ),
+                Some((routes, deps, c)) => {
+                    let direct: f64 = routes
+                        .iter()
+                        .zip(&deps)
+                        .map(|(r, &k)| route_length(&m, inst.depots[k], r) + fixed)
+                        .sum();
+                    assert!((direct - c).abs() < 1e-9);
+                    assert!(
+                        (c - brute).abs() < 1e-6,
+                        "seed {seed}: exact {c} vs brute {brute}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

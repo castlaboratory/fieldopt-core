@@ -367,11 +367,11 @@ pub(crate) fn or_opt(m: &Matrix, depot: usize, tour: &mut Vec<usize>, symmetric:
 fn lower_bound(inst: &Instance, units: &[usize], upper: f64) -> (f64, bool) {
     let general = in_out_bound(inst.m, inst.depot, units);
     if inst.symmetric && inst.single_route_allowed(units) {
-        let (hk, is_tour) = vrp::held_karp_bound(inst.m, inst.depot, units, upper);
+        let (hk, _) = vrp::held_karp_bound(inst.m, inst.depot, units, upper);
         let b = general
             .max(two_edge_bound(inst.m, inst.depot, units))
             .max(hk);
-        (b.min(upper), is_tour || upper - b <= 1e-9 * upper.max(1.0))
+        (b.min(upper), upper - b <= 1e-9 * upper.max(1.0))
     } else {
         (general.min(upper), false)
     }

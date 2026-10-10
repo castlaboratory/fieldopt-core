@@ -2,7 +2,7 @@
 //! CVRPLIB set A (Augerat et al., capacity) instances.
 //!
 //! ```text
-//! cargo run --release --example benchmark -- <dir with .tsp/.vrp files> [iterations] [time limit in seconds]
+//! cargo run --release --example benchmark -- <dir with .tsp/.vrp/.mdvrp files> [iterations] [time limit in seconds] [seed]
 //! ```
 //! Distances are rounded to the nearest integer as the libraries do, so the
 //! costs compare directly with the published optima (the `Optimal value`
@@ -107,19 +107,20 @@ fn parse_cordeau(path: &std::path::Path) -> Parsed {
 }
 
 /// Best known solutions of Cordeau's MDVRP instances (Euclidean distances,
-/// not rounded), from the literature up to Vidal et al. (2012).
+/// not rounded) as distributed with the instances by the NEO group
+/// (neo.lcc.uma.es/vrp, file C-mdvrp-sol.zip).
 const MDVRP_BEST: &[(&str, f64)] = &[
     ("p01", 576.87),
     ("p02", 473.53),
     ("p03", 641.19),
-    ("p04", 1001.04),
+    ("p04", 1001.59),
     ("p05", 750.03),
     ("p06", 876.50),
-    ("p07", 881.97),
-    ("p08", 4372.78),
-    ("p09", 3858.66),
-    ("p10", 3631.11),
-    ("p11", 3546.06),
+    ("p07", 885.80),
+    ("p08", 4437.68),
+    ("p09", 3900.22),
+    ("p10", 3663.02),
+    ("p11", 3554.18),
     ("p12", 1318.95),
     ("p13", 1318.95),
     ("p14", 1360.12),
@@ -131,7 +132,7 @@ const MDVRP_BEST: &[(&str, f64)] = &[
     ("p20", 4058.07),
     ("p21", 5474.84),
     ("p22", 5702.16),
-    ("p23", 6078.75),
+    ("p23", 6095.46),
 ];
 
 fn parse(path: &std::path::Path) -> Parsed {
@@ -211,6 +212,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).expect("directory with instances");
     let iterations: usize = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(2000);
+    let seed: u64 = args.get(4).and_then(|v| v.parse().ok()).unwrap_or(1);
     let time_limit: f64 = args
         .get(3)
         .and_then(|v| v.parse().ok())
@@ -221,7 +223,7 @@ fn main() {
         .filter(|p| {
             matches!(
                 p.extension().and_then(|e| e.to_str()),
-                Some("tsp") | Some("vrp")
+                Some("tsp") | Some("vrp") | Some("mdvrp")
             )
         })
         .collect();
@@ -262,7 +264,7 @@ fn main() {
             iterations,
             time_limit,
             alpha: 0.3,
-            seed: 1,
+            seed,
         };
         let start = Instant::now();
         let sol = if p.depots.len() == 1 && p.routes_per_depot == usize::MAX {
