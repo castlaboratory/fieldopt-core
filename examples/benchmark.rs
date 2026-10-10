@@ -213,6 +213,7 @@ fn main() {
     let dir = args.get(1).expect("directory with instances");
     let iterations: usize = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(2000);
     let seed: u64 = args.get(4).and_then(|v| v.parse().ok()).unwrap_or(1);
+    let certify_time: f64 = args.get(5).and_then(|v| v.parse().ok()).unwrap_or(1.0);
     let time_limit: f64 = args
         .get(3)
         .and_then(|v| v.parse().ok())
@@ -229,8 +230,8 @@ fn main() {
         .collect();
     files.sort();
     println!(
-        "{:<12} {:>5} {:>7} {:>9} {:>9} {:>7} {:>8} {:>6}",
-        "instance", "n", "routes", "cost", "optimum", "gap%", "bound%", "sec"
+        "{:<12} {:>5} {:>7} {:>9} {:>9} {:>7} {:>8} {:>6} {:>4}",
+        "instance", "n", "routes", "cost", "optimum", "gap%", "bound%", "sec", "opt"
     );
     for f in files {
         let p = if f.extension().and_then(|e| e.to_str()) == Some("mdvrp") {
@@ -263,6 +264,7 @@ fn main() {
         let options = GraspOptions {
             iterations,
             time_limit,
+            certify_time,
             alpha: 0.3,
             seed,
         };
@@ -285,7 +287,7 @@ fn main() {
         let gap = p.optimum.map(|o| 100.0 * (sol.total - o) / o);
         let bound_gap = 100.0 * (sol.total - sol.lower_bound) / sol.total;
         println!(
-            "{:<12} {:>5} {:>7} {:>9.2} {:>9} {:>7} {:>8.2} {:>6.1}",
+            "{:<12} {:>5} {:>7} {:>9.2} {:>9} {:>7} {:>8.2} {:>6.1} {:>4}",
             p.name,
             units.len(),
             sol.routes.len(),
@@ -293,7 +295,8 @@ fn main() {
             p.optimum.map_or("?".to_string(), |o| format!("{o:.2}")),
             gap.map_or("?".to_string(), |g| format!("{g:.2}")),
             bound_gap,
-            secs
+            secs,
+            if sol.optimal { "yes" } else { "no" }
         );
     }
 }

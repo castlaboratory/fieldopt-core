@@ -60,6 +60,10 @@ pub struct GraspOptions {
     /// Wall-clock limit of the genetic search in seconds; `f64::INFINITY`
     /// to run `iterations` offspring instead.
     pub time_limit: f64,
+    /// Seconds allowed to the branch-and-bound that tries to prove a single
+    /// tour optimal (symmetric matrices, one depot, limits that allow one
+    /// route); 0 switches it off.
+    pub certify_time: f64,
     /// Greediness of the constructions that seed the population, in
     /// `[0, 1]`: 0 is pure greedy, 1 is uniformly random among all
     /// candidates.
@@ -73,6 +77,7 @@ impl Default for GraspOptions {
         GraspOptions {
             iterations: 200,
             time_limit: f64::INFINITY,
+            certify_time: 1.0,
             alpha: 0.3,
             seed: 1,
         }
@@ -584,14 +589,15 @@ pub fn solve_fleet(
         })?;
         (r, d, c, it, false)
     };
+    let mut routes = routes;
     let route_depots: Vec<usize> = depot_idx.iter().map(|&k| fleet.depots[k]).collect();
-    let lengths: Vec<f64> = routes
+    let mut lengths: Vec<f64> = routes
         .iter()
         .zip(&route_depots)
         .map(|(r, &d)| route_length(m, d, r))
         .collect();
-    let total: f64 = lengths.iter().sum();
-    let (lower_bound, proven) = if optimal {
+    let mut total: f64 = lengths.iter().sum();
+    let (mut lower_bound, mut proven) = if optimal {
         (total, true)
     } else if fleet.depots.len() == 1 {
         lower_bound(&inst, units, total)
@@ -601,6 +607,35 @@ pub fn solve_fleet(
             false,
         )
     };
+    // branch-and-bound certificate for a single tour
+    if !proven
+        && !optimal
+        && options.certify_time > 0.0
+        && symmetric
+        && fleet.depots.len() == 1
+        && routes.len() == 1
+        && inst.single_route_allowed(units)
+    {
+        let cert = crate::certify::certify_tour(
+            m,
+            fleet.depots[0],
+            units,
+            &routes[0],
+            total,
+            usize::MAX,
+            options.certify_time,
+            1e-7,
+        );
+        if let Some(t) = cert.tour {
+            if cert.upper_bound < total - 1e-9 {
+                routes = vec![t];
+                lengths = vec![cert.upper_bound];
+                total = cert.upper_bound;
+            }
+        }
+        lower_bound = lower_bound.max(cert.lower_bound).min(total);
+        proven = cert.optimal;
+    }
     let durations: Vec<f64> = routes
         .iter()
         .zip(&route_depots)
@@ -666,6 +701,7 @@ mod tests {
             GraspOptions {
                 iterations: 50,
                 time_limit: f64::INFINITY,
+                certify_time: 1.0,
                 alpha: 0.3,
                 seed: 3,
             },
@@ -761,6 +797,7 @@ mod tests {
         let o = GraspOptions {
             iterations: 30,
             time_limit: f64::INFINITY,
+            certify_time: 1.0,
             alpha: 0.3,
             seed: 1,
         };
@@ -839,6 +876,7 @@ mod tests {
         let o = GraspOptions {
             iterations: 20,
             time_limit: f64::INFINITY,
+            certify_time: 1.0,
             alpha: 0.3,
             seed: 1,
         };
@@ -863,6 +901,7 @@ mod tests {
         let o = GraspOptions {
             iterations: 20,
             time_limit: f64::INFINITY,
+            certify_time: 1.0,
             alpha: 0.5,
             seed: 11,
         };

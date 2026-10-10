@@ -39,6 +39,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod allocation;
 pub mod balance;
+pub mod certify;
 pub mod distance;
 pub mod dualframe;
 pub mod estimation;
@@ -54,6 +55,7 @@ pub use allocation::{
     Stratum,
 };
 pub use balance::{cube, spatial_balance};
+pub use certify::{certify_tour, Certificate};
 pub use distance::{euclidean_matrix, haversine_matrix, Matrix};
 pub use dualframe::{dual_frame_allocation, Domain, DualFrame, DualFrameAllocation, Target};
 pub use estimation::{ht_total, local_mean_variance, srs_variance};

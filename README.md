@@ -18,8 +18,9 @@ Field-survey design under real field cost, in pure Rust with no dependencies:
   seconds each; on Cordeau's 23 multi-depot instances (50 to 360 customers,
   with route duration limits) at or below the best known solution on 13,
   mean gap 0.20%, largest 1.6%, in 1 to 100 seconds; results vary by less
-  than one percent across seeds. The Held-Karp bound certifies single
-  tours; stops on offspring or on time.
+  than one percent across seeds. A branch-and-bound on Held-Karp 1-trees
+  proves single tours optimal (six of the seven TSPLIB instances within ten
+  seconds); stops on offspring or on time.
 - **Spatially balanced sampling** with the local pivotal method (Grafström,
   Lundström and Schelin 2012) and size-proportional inclusion probabilities.
 - **Design-based estimation**: Horvitz-Thompson total with the local-mean
