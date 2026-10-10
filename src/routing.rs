@@ -55,8 +55,11 @@ impl Default for RouteLimits {
 #[derive(Clone, Copy, Debug)]
 pub struct GraspOptions {
     /// Number of offspring of the genetic search (ignored when the instance
-    /// is solved exactly).
+    /// is solved exactly, or when `time_limit` is finite).
     pub iterations: usize,
+    /// Wall-clock limit of the genetic search in seconds; `f64::INFINITY`
+    /// to run `iterations` offspring instead.
+    pub time_limit: f64,
     /// Greediness of the constructions that seed the population, in
     /// `[0, 1]`: 0 is pure greedy, 1 is uniformly random among all
     /// candidates.
@@ -69,6 +72,7 @@ impl Default for GraspOptions {
     fn default() -> Self {
         GraspOptions {
             iterations: 200,
+            time_limit: f64::INFINITY,
             alpha: 0.3,
             seed: 1,
         }
@@ -424,8 +428,11 @@ pub fn solve_routes(
     if !(0.0..=1.0).contains(&options.alpha) {
         return Err("alpha must be in [0, 1]".into());
     }
-    if options.iterations == 0 {
+    if options.iterations == 0 && !options.time_limit.is_finite() {
         return Err("iterations must be at least 1".into());
+    }
+    if options.time_limit.is_nan() || options.time_limit <= 0.0 {
+        return Err("time_limit must be positive".into());
     }
     if limits.max_stops == 0
         || limits.max_length.is_nan()
@@ -472,8 +479,15 @@ pub fn solve_routes(
             .ok_or_else(|| "some unit cannot be served within the route limits".to_string())?;
         (r, c, 0, true)
     } else {
-        let (r, c, it) = vrp::hgs(&inst, units, options.iterations, options.alpha, &mut rng)
-            .ok_or_else(|| "some unit cannot be served within the route limits".to_string())?;
+        let (r, c, it) = vrp::hgs(
+            &inst,
+            units,
+            options.iterations,
+            options.alpha,
+            options.time_limit,
+            &mut rng,
+        )
+        .ok_or_else(|| "some unit cannot be served within the route limits".to_string())?;
         (r, c, it, false)
     };
     let (lower_bound, proven) = if optimal {
@@ -525,6 +539,7 @@ mod tests {
             RouteLimits::default(),
             GraspOptions {
                 iterations: 50,
+                time_limit: f64::INFINITY,
                 alpha: 0.3,
                 seed: 3,
             },
@@ -619,6 +634,7 @@ mod tests {
         let units: Vec<usize> = (1..n).collect();
         let o = GraspOptions {
             iterations: 30,
+            time_limit: f64::INFINITY,
             alpha: 0.3,
             seed: 1,
         };
@@ -696,6 +712,7 @@ mod tests {
         };
         let o = GraspOptions {
             iterations: 20,
+            time_limit: f64::INFINITY,
             alpha: 0.3,
             seed: 1,
         };
@@ -719,6 +736,7 @@ mod tests {
         let units: Vec<usize> = (1..9).collect();
         let o = GraspOptions {
             iterations: 20,
+            time_limit: f64::INFINITY,
             alpha: 0.5,
             seed: 11,
         };

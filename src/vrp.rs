@@ -2,8 +2,11 @@
 //! genetic search in the spirit of Vidal (2022) with an optimal split of
 //! giant tours (Prins 2004), a local search with granular neighbourhoods
 //! (Toth and Vigo 2003) made of intra-route 2-opt and Or-opt and inter-route
-//! relocate, swap and 2-opt* moves, an exact dynamic programme for small
-//! instances, and the Held-Karp 1-tree bound for single tours.
+//! relocate, swap, SWAP* (Vidal 2022: exchange two units, each inserted at
+//! its best position in the other route) and 2-opt* moves, an exact dynamic
+//! programme for small instances, and the Held-Karp 1-tree bound for single
+//! tours. The genetic search restarts its population after a long run
+//! without improvement and can stop on a time limit.
 
 use crate::distance::Matrix;
 use crate::rng::Rng;
@@ -180,6 +183,34 @@ pub(crate) fn local_search(inst: &Instance, routes: &mut Vec<Vec<usize>>, rng: &
             let (a, i) = pos[u];
             let (pa, na) = (prev(&routes[a], i), next(&routes[a], i));
             let remove_gain = inst.c(pa, u) + inst.c(u, na) - inst.c(pa, na);
+            // intra-route swap with a neighbour (travel can only decrease: no feasibility check needed)
+            for &v in &inst.neighbours[u] {
+                let (b, j) = pos[v];
+                if b != a || j == i {
+                    continue;
+                }
+                let (lo, hi) = if i < j { (i, j) } else { (j, i) };
+                let (x, y) = (routes[a][lo], routes[a][hi]);
+                let (px, ny) = (prev(&routes[a], lo), next(&routes[a], hi));
+                let delta = if hi == lo + 1 {
+                    inst.c(px, y) + inst.c(y, x) + inst.c(x, ny)
+                        - inst.c(px, x)
+                        - inst.c(x, y)
+                        - inst.c(y, ny)
+                } else {
+                    let (nx, py) = (routes[a][lo + 1], routes[a][hi - 1]);
+                    inst.c(px, y) + inst.c(y, nx) + inst.c(py, x) + inst.c(x, ny)
+                        - inst.c(px, x)
+                        - inst.c(x, nx)
+                        - inst.c(py, y)
+                        - inst.c(y, ny)
+                };
+                if delta < -1e-9 {
+                    routes[a].swap(lo, hi);
+                    improved = true;
+                    break 'scan;
+                }
+            }
             // relocate u at the start of every other route
             for b in 0..routes.len() {
                 if b == a {
@@ -266,6 +297,25 @@ pub(crate) fn local_search(inst: &Instance, routes: &mut Vec<Vec<usize>>, rng: &
                         break 'scan;
                     }
                 }
+                // SWAP*: u goes to its best position in b without v, v to its best position in a without u
+                let remove_gain_v = inst.c(pb, v) + inst.c(v, nb) - inst.c(pb, nb);
+                let mut ra = routes[a].clone();
+                ra.remove(i);
+                let mut rb = routes[b].clone();
+                rb.remove(j);
+                let (ins_u, pos_u) = best_insertion(inst, &rb, u);
+                let (ins_v, pos_v) = best_insertion(inst, &ra, v);
+                let delta = ins_u + ins_v - remove_gain - remove_gain_v;
+                if delta < -1e-9 {
+                    rb.insert(pos_u, u);
+                    ra.insert(pos_v, v);
+                    if inst.feasible(&ra) && inst.feasible(&rb) {
+                        routes[a] = ra;
+                        routes[b] = rb;
+                        improved = true;
+                        break 'scan;
+                    }
+                }
             }
         }
         routes.retain(|r| !r.is_empty());
@@ -273,6 +323,21 @@ pub(crate) fn local_search(inst: &Instance, routes: &mut Vec<Vec<usize>>, rng: &
             break;
         }
     }
+}
+
+/// Cheapest insertion of `u` into `route` (cost increase and position).
+fn best_insertion(inst: &Instance, route: &[usize], u: usize) -> (f64, usize) {
+    let d = inst.depot;
+    let mut best = (f64::INFINITY, 0usize);
+    for p in 0..=route.len() {
+        let x = if p == 0 { d } else { route[p - 1] };
+        let y = if p == route.len() { d } else { route[p] };
+        let c = inst.c(x, u) + inst.c(u, y) - inst.c(x, y);
+        if c < best.0 {
+            best = (c, p);
+        }
+    }
+    best
 }
 
 struct Indiv {
@@ -387,12 +452,16 @@ pub(crate) fn hgs(
     units: &[usize],
     iterations: usize,
     alpha: f64,
+    time_limit: f64,
     rng: &mut Rng,
 ) -> Option<(Vec<Vec<usize>>, f64, usize)> {
     let n = inst.m.len();
     let (mu, lambda, nb_elite, nb_close) = (10usize, 20usize, 4usize, 3usize);
+    let start = std::time::Instant::now();
     let mut pop: Vec<Indiv> = Vec::with_capacity(mu + lambda + 1);
     let mut best: Option<(Vec<Vec<usize>>, f64, usize)> = None;
+    let mut last_improvement = 0usize;
+    let patience = (iterations / 4).max(500);
     let add = |pop: &mut Vec<Indiv>,
                tour: Vec<usize>,
                it: usize,
@@ -419,7 +488,30 @@ pub(crate) fn hgs(
             return None;
         }
     }
-    for it in 1..=iterations {
+    let mut it = 0usize;
+    loop {
+        it += 1;
+        let out_of_iterations = time_limit.is_infinite() && it > iterations;
+        let out_of_time = time_limit.is_finite() && start.elapsed().as_secs_f64() >= time_limit;
+        if out_of_iterations || out_of_time {
+            break;
+        }
+        // restart after a long run without improvement, keeping the best
+        if let Some(b) = &best {
+            if it - b.2.max(last_improvement) > patience {
+                let keep: Vec<usize> = b.0.iter().flatten().copied().collect();
+                pop.clear();
+                pop.push(Indiv {
+                    tour: keep,
+                    cost: b.1,
+                });
+                for _ in 1..mu {
+                    let tour = construct(inst.m, inst.depot, units, alpha.max(0.3), rng);
+                    add(&mut pop, tour, it, &mut best, rng);
+                }
+                last_improvement = it;
+            }
+        }
         let fit = biased_fitness(&pop, n, inst.depot, nb_elite, nb_close);
         let pick = |rng: &mut Rng| {
             let a = rng.below(pop.len());
@@ -721,7 +813,7 @@ mod tests {
                 "seed {seed}: brute {brute} exact {cost}"
             );
             let mut rng = Rng::new(seed);
-            let (_, hcost, _) = hgs(&inst, &units, 100, 0.3, &mut rng).unwrap();
+            let (_, hcost, _) = hgs(&inst, &units, 100, 0.3, f64::INFINITY, &mut rng).unwrap();
             assert!(
                 hcost <= cost + 1e-9,
                 "seed {seed}: hgs {hcost} > exact {cost}"

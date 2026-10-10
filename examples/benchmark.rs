@@ -2,7 +2,7 @@
 //! CVRPLIB set A (Augerat et al., capacity) instances.
 //!
 //! ```text
-//! cargo run --release --example benchmark -- <dir with .tsp/.vrp files> [iterations]
+//! cargo run --release --example benchmark -- <dir with .tsp/.vrp files> [iterations] [time limit in seconds]
 //! ```
 //! Distances are rounded to the nearest integer as the libraries do, so the
 //! costs compare directly with the published optima (the `Optimal value`
@@ -103,6 +103,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).expect("directory with instances");
     let iterations: usize = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(2000);
+    let time_limit: f64 = args
+        .get(3)
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(f64::INFINITY);
     let mut files: Vec<_> = std::fs::read_dir(dir)
         .expect("read dir")
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -139,6 +143,7 @@ fn main() {
         };
         let options = GraspOptions {
             iterations,
+            time_limit: f64::INFINITY,
             alpha: 0.3,
             seed: 1,
         };
