@@ -6,13 +6,15 @@ Field-survey design under real field cost, in pure Rust with no dependencies:
   by the user from a road network (for example OSRM).
 - **Routing of field work**: instances of up to 13 units are solved exactly
   (dynamic programming over subsets); larger ones by a hybrid genetic search
-  (Vidal 2022) with the optimal split of Prins (2004) and a granular local
-  search (2-opt, Or-opt, relocate, swap, SWAP*, 2-opt*), under limits on route
-  duration (travel plus service time), stops and capacity, on symmetric or
-  asymmetric matrices. Optimal on the seven classical TSPLIB instances up to
-  101 nodes and within 0.7% of the optimum (0.12% on average, 18 of 27
-  optimal) on the Augerat set A CVRP instances, in about one second each;
-  the Held-Karp bound certifies single tours; stops on offspring or on time.
+  (Vidal 2022) with feasible and infeasible subpopulations under adaptive
+  penalties, the optimal split of Prins (2004), and a granular local search
+  (2-opt, Or-opt, relocate, swap, SWAP*, 2-opt*) priced from route totals in
+  constant time, under limits on route duration (travel plus service time),
+  stops and capacity, on symmetric or asymmetric matrices. Optimal on the
+  seven classical TSPLIB instances up to 101 nodes and on 24 of the 27
+  Augerat set A CVRP instances (mean gap 0.01%, largest 0.15%) in about two
+  seconds each; the Held-Karp bound certifies single tours; stops on
+  offspring or on time.
 - **Spatially balanced sampling** with the local pivotal method (Grafström,
   Lundström and Schelin 2012) and size-proportional inclusion probabilities.
 - **Design-based estimation**: Horvitz-Thompson total with the local-mean

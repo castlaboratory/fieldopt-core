@@ -5,8 +5,11 @@
 //! relocate, swap, SWAP* (Vidal 2022: exchange two units, each inserted at
 //! its best position in the other route) and 2-opt* moves, an exact dynamic
 //! programme for small instances, and the Held-Karp 1-tree bound for single
-//! tours. The genetic search restarts its population after a long run
-//! without improvement and can stop on a time limit.
+//! tours. The genetic search keeps feasible and infeasible subpopulations
+//! with adaptive penalties on the excess load, duration and stops, prices
+//! moves from route totals and prefix sums in constant time, restarts its
+//! population after a long run without improvement and can stop on a time
+//! limit.
 
 use crate::distance::Matrix;
 use crate::rng::Rng;
@@ -91,11 +94,182 @@ impl<'a> Instance<'a> {
     }
 }
 
-/// Optimal split of a giant tour into feasible routes (Prins 2004); `None`
-/// when a unit cannot be served alone.
-pub(crate) fn split(inst: &Instance, tour: &[usize]) -> Option<Vec<Vec<usize>>> {
+/// Penalty weights on the excess load, duration and stops of a route; the
+/// search walks through infeasible solutions at this price (Vidal 2022).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Penalties {
+    pub load: f64,
+    pub duration: f64,
+    pub stops: f64,
+}
+
+impl Penalties {
+    fn scaled(self, k: f64) -> Penalties {
+        Penalties {
+            load: self.load * k,
+            duration: self.duration * k,
+            stops: self.stops * k,
+        }
+    }
+}
+
+/// Totals and prefix sums of one route, so that moves are priced in O(1).
+#[derive(Clone, Debug, Default)]
+struct RouteInfo {
+    travel: f64,
+    load: f64,
+    service: f64,
+    /// `pre_t[k]`: travel from the depot to `route[k]`; `suf_t[k]`: travel from
+    /// `route[k]` to the depot through the rest of the route.
+    pre_t: Vec<f64>,
+    suf_t: Vec<f64>,
+    pre_l: Vec<f64>,
+    pre_s: Vec<f64>,
+}
+
+impl RouteInfo {
+    fn new(inst: &Instance, route: &[usize]) -> Self {
+        let d = inst.depot;
+        let n = route.len();
+        let mut info = RouteInfo::default();
+        if n == 0 {
+            return info;
+        }
+        info.pre_t = vec![0.0; n];
+        info.suf_t = vec![0.0; n];
+        info.pre_l = vec![0.0; n];
+        info.pre_s = vec![0.0; n];
+        info.pre_t[0] = inst.c(d, route[0]);
+        info.pre_l[0] = inst.demand[route[0]];
+        info.pre_s[0] = inst.service[route[0]];
+        for k in 1..n {
+            info.pre_t[k] = info.pre_t[k - 1] + inst.c(route[k - 1], route[k]);
+            info.pre_l[k] = info.pre_l[k - 1] + inst.demand[route[k]];
+            info.pre_s[k] = info.pre_s[k - 1] + inst.service[route[k]];
+        }
+        info.suf_t[n - 1] = inst.c(route[n - 1], d);
+        for k in (0..n - 1).rev() {
+            info.suf_t[k] = inst.c(route[k], route[k + 1]) + info.suf_t[k + 1];
+        }
+        info.travel = info.pre_t[n - 1] + inst.c(route[n - 1], d);
+        info.load = info.pre_l[n - 1];
+        info.service = info.pre_s[n - 1];
+        info
+    }
+}
+
+#[inline]
+fn excess(x: f64, limit: f64) -> f64 {
+    if x > limit {
+        x - limit
+    } else {
+        0.0
+    }
+}
+
+impl<'a> Instance<'a> {
+    /// Penalised cost of a route given its totals.
+    #[inline]
+    fn route_cost(
+        &self,
+        travel: f64,
+        load: f64,
+        service: f64,
+        stops: usize,
+        pen: &Penalties,
+    ) -> f64 {
+        let l = &self.limits;
+        travel
+            + pen.load * excess(load, l.capacity)
+            + pen.duration * excess(travel + service, l.max_length)
+            + pen.stops
+                * excess(
+                    stops as f64,
+                    if l.max_stops == usize::MAX {
+                        f64::INFINITY
+                    } else {
+                        l.max_stops as f64
+                    },
+                )
+    }
+
+    #[inline]
+    fn info_cost(&self, info: &RouteInfo, stops: usize, pen: &Penalties) -> f64 {
+        self.route_cost(info.travel, info.load, info.service, stops, pen)
+    }
+}
+
+/// A set of routes with their totals.
+#[derive(Clone, Debug)]
+pub(crate) struct Sol {
+    routes: Vec<Vec<usize>>,
+    infos: Vec<RouteInfo>,
+}
+
+impl Sol {
+    fn new(inst: &Instance, routes: Vec<Vec<usize>>) -> Self {
+        let infos = routes.iter().map(|r| RouteInfo::new(inst, r)).collect();
+        Sol { routes, infos }
+    }
+
+    fn travel(&self) -> f64 {
+        self.infos.iter().map(|i| i.travel).sum()
+    }
+
+    fn cost(&self, inst: &Instance, pen: &Penalties) -> f64 {
+        self.routes
+            .iter()
+            .zip(&self.infos)
+            .map(|(r, i)| inst.info_cost(i, r.len(), pen))
+            .sum()
+    }
+
+    fn feasible(&self, inst: &Instance) -> bool {
+        self.routes.iter().all(|r| inst.feasible(r))
+    }
+
+    fn refresh(&mut self, inst: &Instance, k: usize) {
+        self.infos[k] = RouteInfo::new(inst, &self.routes[k]);
+    }
+
+    fn drop_empty(&mut self) {
+        let keep: Vec<bool> = self.routes.iter().map(|r| !r.is_empty()).collect();
+        let mut k = 0;
+        self.routes.retain(|_| {
+            k += 1;
+            keep[k - 1]
+        });
+        k = 0;
+        self.infos.retain(|_| {
+            k += 1;
+            keep[k - 1]
+        });
+    }
+}
+
+/// Optimal split of a giant tour into routes (Prins 2004) under the
+/// penalised cost: routes may exceed the limits by up to half, at the
+/// penalty's price. `None` when no unit can start a route (never, in
+/// practice, once every unit alone is feasible).
+fn split_penalised(inst: &Instance, tour: &[usize], pen: &Penalties) -> Option<Vec<Vec<usize>>> {
     let n = tour.len();
     let d = inst.depot;
+    let l = &inst.limits;
+    let max_load = if l.capacity.is_finite() {
+        1.5 * l.capacity
+    } else {
+        f64::INFINITY
+    };
+    let max_dur = if l.max_length.is_finite() {
+        1.5 * l.max_length
+    } else {
+        f64::INFINITY
+    };
+    let max_stops = if l.max_stops == usize::MAX {
+        usize::MAX
+    } else {
+        (3 * l.max_stops + 1) / 2
+    };
     let mut cost = vec![f64::INFINITY; n + 1];
     let mut pred = vec![usize::MAX; n + 1];
     cost[0] = 0.0;
@@ -105,7 +279,8 @@ pub(crate) fn split(inst: &Instance, tour: &[usize]) -> Option<Vec<Vec<usize>>> 
         }
         let (mut len, mut served, mut load) = (0.0, 0.0, 0.0);
         for j in i..n {
-            if j - i + 1 > inst.limits.max_stops {
+            let stops = j - i + 1;
+            if stops > max_stops {
                 break;
             }
             len += if j == i {
@@ -115,13 +290,14 @@ pub(crate) fn split(inst: &Instance, tour: &[usize]) -> Option<Vec<Vec<usize>>> 
             };
             served += inst.service[tour[j]];
             load += inst.demand[tour[j]];
-            if load > inst.limits.capacity + 1e-9 {
+            if load > max_load + 1e-9 {
                 break;
             }
-            let route_cost = len + inst.c(tour[j], d);
-            if route_cost + served > inst.limits.max_length + 1e-9 {
+            let travel = len + inst.c(tour[j], d);
+            if travel + served > max_dur + 1e-9 {
                 break;
             }
+            let route_cost = inst.route_cost(travel, load, served, stops, pen);
             if cost[i] + route_cost < cost[j + 1] {
                 cost[j + 1] = cost[i] + route_cost;
                 pred[j + 1] = i;
@@ -142,6 +318,23 @@ pub(crate) fn split(inst: &Instance, tour: &[usize]) -> Option<Vec<Vec<usize>>> 
     Some(routes)
 }
 
+/// Feasible split of a giant tour (hard limits), used in tests.
+#[cfg(test)]
+pub(crate) fn split(inst: &Instance, tour: &[usize]) -> Option<Vec<Vec<usize>>> {
+    let hard = Penalties {
+        load: 1e12,
+        duration: 1e12,
+        stops: 1e12,
+    };
+    let routes = split_penalised(inst, tour, &hard)?;
+    if routes.iter().all(|r| inst.feasible(r)) {
+        Some(routes)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
 fn total_travel(inst: &Instance, routes: &[Vec<usize>]) -> f64 {
     routes
         .iter()
@@ -149,183 +342,7 @@ fn total_travel(inst: &Instance, routes: &[Vec<usize>]) -> f64 {
         .sum()
 }
 
-/// Local search over a set of routes: intra-route 2-opt and Or-opt, and
-/// inter-route relocate, swap and 2-opt* restricted to granular
-/// neighbourhoods. Every accepted move is feasible and strictly improving.
-pub(crate) fn local_search(inst: &Instance, routes: &mut Vec<Vec<usize>>, rng: &mut Rng) {
-    let d = inst.depot;
-    let n = inst.m.len();
-    let mut guard = 0usize;
-    loop {
-        guard += 1;
-        let mut improved = false;
-        for r in routes.iter_mut() {
-            if two_opt(inst.m, d, r, inst.symmetric) {
-                improved = true;
-            }
-            if or_opt(inst.m, d, r, inst.symmetric) {
-                improved = true;
-            }
-        }
-        routes.retain(|r| !r.is_empty());
-        // positions
-        let mut pos = vec![(usize::MAX, usize::MAX); n];
-        for (a, r) in routes.iter().enumerate() {
-            for (i, &u) in r.iter().enumerate() {
-                pos[u] = (a, i);
-            }
-        }
-        let mut order: Vec<usize> = routes.iter().flatten().copied().collect();
-        rng.shuffle(&mut order);
-        let prev = |r: &[usize], i: usize| if i == 0 { d } else { r[i - 1] };
-        let next = |r: &[usize], i: usize| if i + 1 >= r.len() { d } else { r[i + 1] };
-        'scan: for &u in &order {
-            let (a, i) = pos[u];
-            let (pa, na) = (prev(&routes[a], i), next(&routes[a], i));
-            let remove_gain = inst.c(pa, u) + inst.c(u, na) - inst.c(pa, na);
-            // intra-route swap with a neighbour (travel can only decrease: no feasibility check needed)
-            for &v in &inst.neighbours[u] {
-                let (b, j) = pos[v];
-                if b != a || j == i {
-                    continue;
-                }
-                let (lo, hi) = if i < j { (i, j) } else { (j, i) };
-                let (x, y) = (routes[a][lo], routes[a][hi]);
-                let (px, ny) = (prev(&routes[a], lo), next(&routes[a], hi));
-                let delta = if hi == lo + 1 {
-                    inst.c(px, y) + inst.c(y, x) + inst.c(x, ny)
-                        - inst.c(px, x)
-                        - inst.c(x, y)
-                        - inst.c(y, ny)
-                } else {
-                    let (nx, py) = (routes[a][lo + 1], routes[a][hi - 1]);
-                    inst.c(px, y) + inst.c(y, nx) + inst.c(py, x) + inst.c(x, ny)
-                        - inst.c(px, x)
-                        - inst.c(x, nx)
-                        - inst.c(py, y)
-                        - inst.c(y, ny)
-                };
-                if delta < -1e-9 {
-                    routes[a].swap(lo, hi);
-                    improved = true;
-                    break 'scan;
-                }
-            }
-            // relocate u at the start of every other route
-            for b in 0..routes.len() {
-                if b == a {
-                    continue;
-                }
-                let first = routes[b][0];
-                let delta = inst.c(d, u) + inst.c(u, first) - inst.c(d, first) - remove_gain;
-                if delta < -1e-9 {
-                    let mut ra = routes[a].clone();
-                    ra.remove(i);
-                    let mut rb = routes[b].clone();
-                    rb.insert(0, u);
-                    if (ra.is_empty() || inst.feasible(&ra)) && inst.feasible(&rb) {
-                        routes[a] = ra;
-                        routes[b] = rb;
-                        improved = true;
-                        break 'scan;
-                    }
-                }
-            }
-            for &v in &inst.neighbours[u] {
-                let (b, j) = pos[v];
-                if b == usize::MAX || b == a {
-                    continue;
-                }
-                let (pb, nb) = (prev(&routes[b], j), next(&routes[b], j));
-                // relocate u after v
-                let delta = inst.c(v, u) + inst.c(u, nb) - inst.c(v, nb) - remove_gain;
-                if delta < -1e-9 {
-                    let mut ra = routes[a].clone();
-                    ra.remove(i);
-                    let mut rb = routes[b].clone();
-                    rb.insert(j + 1, u);
-                    if (ra.is_empty() || inst.feasible(&ra)) && inst.feasible(&rb) {
-                        routes[a] = ra;
-                        routes[b] = rb;
-                        improved = true;
-                        break 'scan;
-                    }
-                }
-                // relocate u before v
-                let delta = inst.c(pb, u) + inst.c(u, v) - inst.c(pb, v) - remove_gain;
-                if delta < -1e-9 {
-                    let mut ra = routes[a].clone();
-                    ra.remove(i);
-                    let mut rb = routes[b].clone();
-                    rb.insert(j, u);
-                    if (ra.is_empty() || inst.feasible(&ra)) && inst.feasible(&rb) {
-                        routes[a] = ra;
-                        routes[b] = rb;
-                        improved = true;
-                        break 'scan;
-                    }
-                }
-                // swap u and v
-                let delta = inst.c(pa, v) + inst.c(v, na) - inst.c(pa, u) - inst.c(u, na)
-                    + inst.c(pb, u)
-                    + inst.c(u, nb)
-                    - inst.c(pb, v)
-                    - inst.c(v, nb);
-                if delta < -1e-9 {
-                    let mut ra = routes[a].clone();
-                    let mut rb = routes[b].clone();
-                    ra[i] = v;
-                    rb[j] = u;
-                    if inst.feasible(&ra) && inst.feasible(&rb) {
-                        routes[a] = ra;
-                        routes[b] = rb;
-                        improved = true;
-                        break 'scan;
-                    }
-                }
-                // 2-opt*: exchange the tails after u and after v
-                let delta = inst.c(u, nb) + inst.c(v, na) - inst.c(u, na) - inst.c(v, nb);
-                if delta < -1e-9 {
-                    let mut ra: Vec<usize> = routes[a][..=i].to_vec();
-                    ra.extend_from_slice(&routes[b][j + 1..]);
-                    let mut rb: Vec<usize> = routes[b][..=j].to_vec();
-                    rb.extend_from_slice(&routes[a][i + 1..]);
-                    if inst.feasible(&ra) && inst.feasible(&rb) {
-                        routes[a] = ra;
-                        routes[b] = rb;
-                        improved = true;
-                        break 'scan;
-                    }
-                }
-                // SWAP*: u goes to its best position in b without v, v to its best position in a without u
-                let remove_gain_v = inst.c(pb, v) + inst.c(v, nb) - inst.c(pb, nb);
-                let mut ra = routes[a].clone();
-                ra.remove(i);
-                let mut rb = routes[b].clone();
-                rb.remove(j);
-                let (ins_u, pos_u) = best_insertion(inst, &rb, u);
-                let (ins_v, pos_v) = best_insertion(inst, &ra, v);
-                let delta = ins_u + ins_v - remove_gain - remove_gain_v;
-                if delta < -1e-9 {
-                    rb.insert(pos_u, u);
-                    ra.insert(pos_v, v);
-                    if inst.feasible(&ra) && inst.feasible(&rb) {
-                        routes[a] = ra;
-                        routes[b] = rb;
-                        improved = true;
-                        break 'scan;
-                    }
-                }
-            }
-        }
-        routes.retain(|r| !r.is_empty());
-        if !improved || guard > 10_000 {
-            break;
-        }
-    }
-}
-
-/// Cheapest insertion of `u` into `route` (cost increase and position).
+/// Cheapest insertion of `u` into `route` (travel increase and position).
 fn best_insertion(inst: &Instance, route: &[usize], u: usize) -> (f64, usize) {
     let d = inst.depot;
     let mut best = (f64::INFINITY, 0usize);
@@ -340,8 +357,271 @@ fn best_insertion(inst: &Instance, route: &[usize], u: usize) -> (f64, usize) {
     best
 }
 
+/// Local search over a solution under penalised costs: intra-route 2-opt,
+/// Or-opt and swap; inter-route relocate (also into a new route), swap,
+/// SWAP* and 2-opt*, restricted to granular neighbourhoods. Moves are priced
+/// from the route totals in constant time (SWAP* in linear time) and
+/// accepted when they lower the penalised cost.
+fn local_search_pen(inst: &Instance, sol: &mut Sol, pen: &Penalties, rng: &mut Rng) {
+    let d = inst.depot;
+    let n = inst.m.len();
+    let l = &inst.limits;
+    let mut guard = 0usize;
+    loop {
+        guard += 1;
+        let mut improved = false;
+        // intra-route moves on travel: they never raise a penalty
+        for k in 0..sol.routes.len() {
+            let mut changed = false;
+            if two_opt(inst.m, d, &mut sol.routes[k], inst.symmetric) {
+                changed = true;
+            }
+            if or_opt(inst.m, d, &mut sol.routes[k], inst.symmetric) {
+                changed = true;
+            }
+            if changed {
+                sol.refresh(inst, k);
+                improved = true;
+            }
+        }
+        sol.drop_empty();
+        let mut pos = vec![(usize::MAX, usize::MAX); n];
+        for (a, r) in sol.routes.iter().enumerate() {
+            for (i, &u) in r.iter().enumerate() {
+                pos[u] = (a, i);
+            }
+        }
+        let mut order: Vec<usize> = sol.routes.iter().flatten().copied().collect();
+        rng.shuffle(&mut order);
+        let prev = |r: &[usize], i: usize| if i == 0 { d } else { r[i - 1] };
+        let next = |r: &[usize], i: usize| if i + 1 >= r.len() { d } else { r[i + 1] };
+        let cost_of = |travel: f64, load: f64, service: f64, stops: usize| {
+            inst.route_cost(travel, load, service, stops, pen)
+        };
+        'scan: for &u in &order {
+            let (a, i) = pos[u];
+            let ra = &sol.routes[a];
+            let ia = &sol.infos[a];
+            let (pa, na) = (prev(ra, i), next(ra, i));
+            let (du, su) = (inst.demand[u], inst.service[u]);
+            let remove_gain = inst.c(pa, u) + inst.c(u, na) - inst.c(pa, na);
+            let cost_a = inst.info_cost(ia, ra.len(), pen);
+            let cost_a_without = cost_of(
+                ia.travel - remove_gain,
+                ia.load - du,
+                ia.service - su,
+                ra.len() - 1,
+            );
+            // relocate u into a route of its own (worth it when a is overloaded)
+            if ra.len() > 1 {
+                let alone = cost_of(inst.c(d, u) + inst.c(u, d), du, su, 1);
+                if cost_a_without + alone < cost_a - 1e-9 {
+                    sol.routes[a].remove(i);
+                    sol.routes.push(vec![u]);
+                    sol.infos.push(RouteInfo::default());
+                    let last = sol.routes.len() - 1;
+                    sol.refresh(inst, a);
+                    sol.refresh(inst, last);
+                    improved = true;
+                    break 'scan;
+                }
+            }
+            // intra-route swap with a neighbour
+            for &v in &inst.neighbours[u] {
+                let (b, j) = pos[v];
+                if b != a || j == i {
+                    continue;
+                }
+                let (lo, hi) = if i < j { (i, j) } else { (j, i) };
+                let (x, y) = (ra[lo], ra[hi]);
+                let (px, ny) = (prev(ra, lo), next(ra, hi));
+                let delta = if hi == lo + 1 {
+                    inst.c(px, y) + inst.c(y, x) + inst.c(x, ny)
+                        - inst.c(px, x)
+                        - inst.c(x, y)
+                        - inst.c(y, ny)
+                } else {
+                    let (nx, py) = (ra[lo + 1], ra[hi - 1]);
+                    inst.c(px, y) + inst.c(y, nx) + inst.c(py, x) + inst.c(x, ny)
+                        - inst.c(px, x)
+                        - inst.c(x, nx)
+                        - inst.c(py, y)
+                        - inst.c(y, ny)
+                };
+                if delta < -1e-9 {
+                    sol.routes[a].swap(lo, hi);
+                    sol.refresh(inst, a);
+                    improved = true;
+                    break 'scan;
+                }
+            }
+            // relocate u at the start of every other route
+            for b in 0..sol.routes.len() {
+                if b == a {
+                    continue;
+                }
+                let rb = &sol.routes[b];
+                let ib = &sol.infos[b];
+                let first = rb[0];
+                let ins = inst.c(d, u) + inst.c(u, first) - inst.c(d, first);
+                let cost_b = inst.info_cost(ib, rb.len(), pen);
+                let new_b = cost_of(ib.travel + ins, ib.load + du, ib.service + su, rb.len() + 1);
+                if cost_a_without + new_b < cost_a + cost_b - 1e-9 {
+                    sol.routes[a].remove(i);
+                    sol.routes[b].insert(0, u);
+                    sol.refresh(inst, a);
+                    sol.refresh(inst, b);
+                    improved = true;
+                    break 'scan;
+                }
+            }
+            for &v in &inst.neighbours[u] {
+                let (b, j) = pos[v];
+                if b == usize::MAX || b == a {
+                    continue;
+                }
+                let rb = &sol.routes[b];
+                let ib = &sol.infos[b];
+                let (pb, nb) = (prev(rb, j), next(rb, j));
+                let (dv, sv) = (inst.demand[v], inst.service[v]);
+                let cost_b = inst.info_cost(ib, rb.len(), pen);
+                let base = cost_a + cost_b;
+                // relocate u after v
+                let ins = inst.c(v, u) + inst.c(u, nb) - inst.c(v, nb);
+                let new_b = cost_of(ib.travel + ins, ib.load + du, ib.service + su, rb.len() + 1);
+                if cost_a_without + new_b < base - 1e-9 {
+                    sol.routes[a].remove(i);
+                    sol.routes[b].insert(j + 1, u);
+                    sol.refresh(inst, a);
+                    sol.refresh(inst, b);
+                    improved = true;
+                    break 'scan;
+                }
+                // relocate u before v
+                let ins = inst.c(pb, u) + inst.c(u, v) - inst.c(pb, v);
+                let new_b = cost_of(ib.travel + ins, ib.load + du, ib.service + su, rb.len() + 1);
+                if cost_a_without + new_b < base - 1e-9 {
+                    sol.routes[a].remove(i);
+                    sol.routes[b].insert(j, u);
+                    sol.refresh(inst, a);
+                    sol.refresh(inst, b);
+                    improved = true;
+                    break 'scan;
+                }
+                // swap u and v in place
+                let ta = ia.travel - inst.c(pa, u) - inst.c(u, na) + inst.c(pa, v) + inst.c(v, na);
+                let tb = ib.travel - inst.c(pb, v) - inst.c(v, nb) + inst.c(pb, u) + inst.c(u, nb);
+                let new_a = cost_of(ta, ia.load - du + dv, ia.service - su + sv, ra.len());
+                let new_b = cost_of(tb, ib.load - dv + du, ib.service - sv + su, rb.len());
+                if new_a + new_b < base - 1e-9 {
+                    sol.routes[a][i] = v;
+                    sol.routes[b][j] = u;
+                    sol.refresh(inst, a);
+                    sol.refresh(inst, b);
+                    improved = true;
+                    break 'scan;
+                }
+                // 2-opt*: a[..=i] + b[j+1..] and b[..=j] + a[i+1..]
+                let tail_a = if i + 1 < ra.len() {
+                    inst.c(u, ra[i + 1]) + ia.suf_t[i + 1]
+                } else {
+                    inst.c(u, d)
+                };
+                let tail_b = if j + 1 < rb.len() {
+                    inst.c(v, rb[j + 1]) + ib.suf_t[j + 1]
+                } else {
+                    inst.c(v, d)
+                };
+                let cross_a = if j + 1 < rb.len() {
+                    inst.c(u, rb[j + 1]) + ib.suf_t[j + 1]
+                } else {
+                    inst.c(u, d)
+                };
+                let cross_b = if i + 1 < ra.len() {
+                    inst.c(v, ra[i + 1]) + ia.suf_t[i + 1]
+                } else {
+                    inst.c(v, d)
+                };
+                let _ = (tail_a, tail_b);
+                let ta = ia.pre_t[i] + cross_a;
+                let tb = ib.pre_t[j] + cross_b;
+                let la = ia.pre_l[i] + (ib.load - ib.pre_l[j]);
+                let lb = ib.pre_l[j] + (ia.load - ia.pre_l[i]);
+                let sa = ia.pre_s[i] + (ib.service - ib.pre_s[j]);
+                let sb = ib.pre_s[j] + (ia.service - ia.pre_s[i]);
+                let na_stops = i + 1 + (rb.len() - j - 1);
+                let nb_stops = j + 1 + (ra.len() - i - 1);
+                let new_a = cost_of(ta, la, sa, na_stops);
+                let new_b = cost_of(tb, lb, sb, nb_stops);
+                if new_a + new_b < base - 1e-9 {
+                    let mut new_ra: Vec<usize> = ra[..=i].to_vec();
+                    new_ra.extend_from_slice(&rb[j + 1..]);
+                    let mut new_rb: Vec<usize> = rb[..=j].to_vec();
+                    new_rb.extend_from_slice(&ra[i + 1..]);
+                    sol.routes[a] = new_ra;
+                    sol.routes[b] = new_rb;
+                    sol.refresh(inst, a);
+                    sol.refresh(inst, b);
+                    improved = true;
+                    break 'scan;
+                }
+                // SWAP*: u to its best position in b without v, v to its best position in a without u
+                let remove_gain_v = inst.c(pb, v) + inst.c(v, nb) - inst.c(pb, nb);
+                let mut ra2 = ra.clone();
+                ra2.remove(i);
+                let mut rb2 = rb.clone();
+                rb2.remove(j);
+                let (ins_u, pos_u) = best_insertion(inst, &rb2, u);
+                let (ins_v, pos_v) = best_insertion(inst, &ra2, v);
+                let new_a = cost_of(
+                    ia.travel - remove_gain + ins_v,
+                    ia.load - du + dv,
+                    ia.service - su + sv,
+                    ra.len(),
+                );
+                let new_b = cost_of(
+                    ib.travel - remove_gain_v + ins_u,
+                    ib.load - dv + du,
+                    ib.service - sv + su,
+                    rb.len(),
+                );
+                if new_a + new_b < base - 1e-9 {
+                    rb2.insert(pos_u, u);
+                    ra2.insert(pos_v, v);
+                    sol.routes[a] = ra2;
+                    sol.routes[b] = rb2;
+                    sol.refresh(inst, a);
+                    sol.refresh(inst, b);
+                    improved = true;
+                    break 'scan;
+                }
+            }
+        }
+        sol.drop_empty();
+        if !improved || guard > 20_000 {
+            break;
+        }
+    }
+    let _ = l;
+}
+
+/// Local search with hard limits (feasible in, feasible out), used in tests.
+#[cfg(test)]
+pub(crate) fn local_search(inst: &Instance, routes: &mut Vec<Vec<usize>>, rng: &mut Rng) {
+    let hard = Penalties {
+        load: 1e12,
+        duration: 1e12,
+        stops: 1e12,
+    };
+    let mut sol = Sol::new(inst, std::mem::take(routes));
+    local_search_pen(inst, &mut sol, &hard, rng);
+    *routes = sol.routes;
+}
+
 struct Indiv {
     tour: Vec<usize>,
+    routes: Vec<Vec<usize>>,
+    /// Penalised cost at the time of insertion.
     cost: f64,
 }
 
@@ -395,7 +675,8 @@ fn order_crossover(p1: &[usize], p2: &[usize], rng: &mut Rng) -> Vec<usize> {
     child
 }
 
-/// Biased fitness ranks (lower is better) from cost and diversity.
+/// Biased fitness ranks (lower is better) from cost and diversity within a
+/// subpopulation.
 fn biased_fitness(
     pop: &[Indiv],
     n: usize,
@@ -445,7 +726,69 @@ fn biased_fitness(
         .collect()
 }
 
-/// Hybrid genetic search. Returns the best routes, their travel and the
+/// Survivor selection of one subpopulation: clones first, then the worst
+/// biased fitness, never the best individual.
+fn survivors(
+    pop: &mut Vec<Indiv>,
+    mu: usize,
+    n: usize,
+    depot: usize,
+    nb_elite: usize,
+    nb_close: usize,
+) {
+    while pop.len() > mu {
+        let fit = biased_fitness(pop, n, depot, nb_elite, nb_close);
+        let best_idx = (0..pop.len())
+            .min_by(|&a, &b| {
+                pop[a]
+                    .cost
+                    .partial_cmp(&pop[b].cost)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap();
+        let clone = (0..pop.len()).find(|&i| {
+            i != best_idx && (0..pop.len()).any(|j| j != i && pop[i].tour == pop[j].tour)
+        });
+        let drop = clone.unwrap_or_else(|| {
+            (0..pop.len())
+                .filter(|&i| i != best_idx)
+                .max_by(|&a, &b| {
+                    fit[a]
+                        .partial_cmp(&fit[b])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap()
+        });
+        pop.swap_remove(drop);
+    }
+}
+
+/// Initial penalties from the scale of the instance (Vidal 2022).
+fn initial_penalties(inst: &Instance, units: &[usize]) -> Penalties {
+    let mut max_dist: f64 = 0.0;
+    for &u in units {
+        max_dist = max_dist
+            .max(inst.c(inst.depot, u))
+            .max(inst.c(u, inst.depot));
+        for &v in &inst.neighbours[u] {
+            max_dist = max_dist.max(inst.c(u, v));
+        }
+    }
+    let max_dist = max_dist.max(1e-9);
+    let max_demand = units
+        .iter()
+        .map(|&u| inst.demand[u])
+        .fold(0.0, f64::max)
+        .max(1e-9);
+    Penalties {
+        load: (max_dist / max_demand).clamp(0.1, 1e4),
+        duration: 1.0,
+        stops: max_dist,
+    }
+}
+
+/// Hybrid genetic search with feasible and infeasible subpopulations and
+/// adaptive penalties. Returns the best feasible routes, their travel and the
 /// offspring at which they were found.
 pub(crate) fn hgs(
     inst: &Instance,
@@ -457,37 +800,59 @@ pub(crate) fn hgs(
 ) -> Option<(Vec<Vec<usize>>, f64, usize)> {
     let n = inst.m.len();
     let (mu, lambda, nb_elite, nb_close) = (10usize, 20usize, 4usize, 3usize);
+    let target_feasible = 0.2;
     let start = std::time::Instant::now();
-    let mut pop: Vec<Indiv> = Vec::with_capacity(mu + lambda + 1);
+    let mut pen = initial_penalties(inst, units);
+    let mut feas: Vec<Indiv> = Vec::new();
+    let mut infeas: Vec<Indiv> = Vec::new();
     let mut best: Option<(Vec<Vec<usize>>, f64, usize)> = None;
     let mut last_improvement = 0usize;
     let patience = (iterations / 4).max(500);
-    let add = |pop: &mut Vec<Indiv>,
-               tour: Vec<usize>,
+    // feasibility history of the last offspring, per limit, for the penalty manager
+    let mut hist_load: Vec<bool> = Vec::new();
+    let mut hist_dur: Vec<bool> = Vec::new();
+    let mut hist_stops: Vec<bool> = Vec::new();
+
+    let educate = |tour: Vec<usize>, pen: &Penalties, rng: &mut Rng| -> Option<Sol> {
+        let routes = split_penalised(inst, &tour, pen)?;
+        let mut sol = Sol::new(inst, routes);
+        local_search_pen(inst, &mut sol, pen, rng);
+        Some(sol)
+    };
+    let add = |sol: Sol,
                it: usize,
+               feas: &mut Vec<Indiv>,
+               infeas: &mut Vec<Indiv>,
                best: &mut Option<(Vec<Vec<usize>>, f64, usize)>,
-               rng: &mut Rng|
-     -> bool {
-        let mut routes = match split(inst, &tour) {
-            Some(r) => r,
-            None => return false,
-        };
-        local_search(inst, &mut routes, rng);
-        let cost = total_travel(inst, &routes);
-        let tour: Vec<usize> = routes.iter().flatten().copied().collect();
-        if best.as_ref().map_or(true, |b| cost < b.1 - 1e-9) {
-            *best = Some((routes.clone(), cost, it));
+               pen: &Penalties| {
+        let feasible = sol.feasible(inst);
+        let travel = sol.travel();
+        let cost = sol.cost(inst, pen);
+        let tour: Vec<usize> = sol.routes.iter().flatten().copied().collect();
+        if feasible && best.as_ref().map_or(true, |b| travel < b.1 - 1e-9) {
+            *best = Some((sol.routes.clone(), travel, it));
         }
-        pop.push(Indiv { tour, cost });
-        true
+        let ind = Indiv {
+            tour,
+            routes: sol.routes,
+            cost,
+        };
+        if feasible {
+            feas.push(ind);
+        } else {
+            infeas.push(ind);
+        }
+        feasible
     };
     for k in 0..mu {
         let a = if k == 0 { 0.0 } else { alpha.max(0.2) };
         let tour = construct(inst.m, inst.depot, units, a, rng);
-        if !add(&mut pop, tour, 0, &mut best, rng) {
-            return None;
-        }
+        // seed with hard limits so that a feasible solution exists from the start
+        let hard = pen.scaled(1e9);
+        let sol = educate(tour, &hard, rng)?;
+        add(sol, 0, &mut feas, &mut infeas, &mut best, &pen);
     }
+    best.as_ref()?;
     let mut it = 0usize;
     loop {
         it += 1;
@@ -496,64 +861,124 @@ pub(crate) fn hgs(
         if out_of_iterations || out_of_time {
             break;
         }
-        // restart after a long run without improvement, keeping the best
         if let Some(b) = &best {
             if it - b.2.max(last_improvement) > patience {
                 let keep: Vec<usize> = b.0.iter().flatten().copied().collect();
-                pop.clear();
-                pop.push(Indiv {
-                    tour: keep,
-                    cost: b.1,
-                });
+                feas.clear();
+                infeas.clear();
+                let seed_sol = Sol::new(inst, b.0.clone());
+                add(seed_sol, it, &mut feas, &mut infeas, &mut best, &pen);
                 for _ in 1..mu {
                     let tour = construct(inst.m, inst.depot, units, alpha.max(0.3), rng);
-                    add(&mut pop, tour, it, &mut best, rng);
+                    if let Some(sol) = educate(tour, &pen.scaled(1e9), rng) {
+                        add(sol, it, &mut feas, &mut infeas, &mut best, &pen);
+                    }
                 }
+                let _ = keep;
                 last_improvement = it;
             }
         }
-        let fit = biased_fitness(&pop, n, inst.depot, nb_elite, nb_close);
-        let pick = |rng: &mut Rng| {
-            let a = rng.below(pop.len());
-            let b = rng.below(pop.len());
-            if fit[a] <= fit[b] {
+        // parent selection: binary tournament over both subpopulations, fitness within each
+        let fit_f = biased_fitness(&feas, n, inst.depot, nb_elite, nb_close);
+        let fit_i = biased_fitness(&infeas, n, inst.depot, nb_elite, nb_close);
+        let total = feas.len() + infeas.len();
+        let pick = |rng: &mut Rng| -> (bool, usize) {
+            let draw = |rng: &mut Rng| {
+                let k = rng.below(total);
+                if k < feas.len() {
+                    (true, k)
+                } else {
+                    (false, k - feas.len())
+                }
+            };
+            let (a, b) = (draw(rng), draw(rng));
+            let f = |x: (bool, usize)| if x.0 { fit_f[x.1] } else { fit_i[x.1] };
+            if f(a) <= f(b) {
                 a
             } else {
                 b
             }
         };
         let (p1, p2) = (pick(rng), pick(rng));
-        let child = order_crossover(&pop[p1].tour, &pop[p2].tour, rng);
-        add(&mut pop, child, it, &mut best, rng);
-        if pop.len() >= mu + lambda {
-            // survivor selection: drop clones first, then the worst biased fitness; keep the best
-            while pop.len() > mu {
-                let fit = biased_fitness(&pop, n, inst.depot, nb_elite, nb_close);
-                let best_idx = (0..pop.len())
-                    .min_by(|&a, &b| {
-                        pop[a]
-                            .cost
-                            .partial_cmp(&pop[b].cost)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .unwrap();
-                let clone = (0..pop.len()).find(|&i| {
-                    i != best_idx && (0..pop.len()).any(|j| j != i && pop[i].tour == pop[j].tour)
-                });
-                let drop = clone.unwrap_or_else(|| {
-                    (0..pop.len())
-                        .filter(|&i| i != best_idx)
-                        .max_by(|&a, &b| {
-                            fit[a]
-                                .partial_cmp(&fit[b])
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                        .unwrap()
-                });
-                pop.swap_remove(drop);
+        let t1 = if p1.0 {
+            &feas[p1.1].tour
+        } else {
+            &infeas[p1.1].tour
+        };
+        let t2 = if p2.0 {
+            &feas[p2.1].tour
+        } else {
+            &infeas[p2.1].tour
+        };
+        let child = order_crossover(t1, t2, rng);
+        if let Some(mut sol) = educate(child, &pen, rng) {
+            let routes_ok: Vec<bool> = sol.routes.iter().map(|r| inst.feasible(r)).collect();
+            let feasible = routes_ok.iter().all(|&f| f);
+            // record which limits were violated
+            let l = &inst.limits;
+            let (mut v_load, mut v_dur, mut v_stops) = (false, false, false);
+            for (r, i) in sol.routes.iter().zip(&sol.infos) {
+                if i.load > l.capacity + 1e-9 {
+                    v_load = true;
+                }
+                if i.travel + i.service > l.max_length + 1e-9 {
+                    v_dur = true;
+                }
+                if r.len() > l.max_stops {
+                    v_stops = true;
+                }
+            }
+            hist_load.push(!v_load);
+            hist_dur.push(!v_dur);
+            hist_stops.push(!v_stops);
+            // repair attempt with a tenfold penalty, half of the time
+            if !feasible && rng.next_f64() < 0.5 {
+                let mut repaired = sol.clone();
+                local_search_pen(inst, &mut repaired, &pen.scaled(10.0), rng);
+                if repaired.feasible(inst) {
+                    sol = repaired;
+                }
+            }
+            let was_feasible = add(sol, it, &mut feas, &mut infeas, &mut best, &pen);
+            if was_feasible {
+                if let Some(b) = &best {
+                    if b.2 == it {
+                        last_improvement = it;
+                    }
+                }
+            }
+        }
+        if feas.len() >= mu + lambda {
+            survivors(&mut feas, mu, n, inst.depot, nb_elite, nb_close);
+        }
+        if infeas.len() >= mu + lambda {
+            survivors(&mut infeas, mu, n, inst.depot, nb_elite, nb_close);
+        }
+        // penalty manager every 100 offspring
+        if it % 100 == 0 {
+            let adjust = |hist: &mut Vec<bool>, p: &mut f64| {
+                if hist.is_empty() {
+                    return;
+                }
+                let frac = hist.iter().filter(|&&f| f).count() as f64 / hist.len() as f64;
+                if frac < target_feasible - 0.05 {
+                    *p = (*p * 1.2).min(1e6);
+                } else if frac > target_feasible + 0.05 {
+                    *p = (*p * 0.85).max(1e-3);
+                }
+                hist.clear();
+            };
+            adjust(&mut hist_load, &mut pen.load);
+            adjust(&mut hist_dur, &mut pen.duration);
+            adjust(&mut hist_stops, &mut pen.stops);
+            // re-price the stored individuals under the new penalties
+            for ind in feas.iter_mut().chain(infeas.iter_mut()) {
+                let s = Sol::new(inst, ind.routes.clone());
+                ind.cost = s.cost(inst, &pen);
             }
         }
     }
+    let _ = (feas, infeas);
     best
 }
 
